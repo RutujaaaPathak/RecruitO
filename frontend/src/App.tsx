@@ -1,4 +1,5 @@
 import { Routes, Route, Outlet } from "react-router-dom";
+import ProtectedRoute from "./components/ProtectedRoute";
 
 import Landing from "./pages/landing/Landing";
 import SignIn from "./pages/auth/SignIn";
@@ -56,47 +57,54 @@ function App() {
       <Route path="/signin" element={<SignIn />} />
       <Route path="/signup" element={<Signup />} />
 
-      {/* User Dashboard */}
-      <Route path="/dashboard" element={<DashboardLayout />}>
-        <Route index element={<DashboardHome />} />
-        <Route path="profile" element={<Profile />} />
-        <Route path="jobs" element={<Jobs />} />
-        <Route path="internships" element={<Internships />} />
-        <Route path="resume" element={<Resume />} />
-        <Route path="chatbot" element={<AIChatbot />} />
-        <Route path="settings" element={<Settings />} />
-        <Route path="interview" element={<Interviews />} />
+      {/* User Dashboard Protected */}
+      <Route element={<ProtectedRoute allowedRoles={["user"]} />}>
+        <Route path="/dashboard" element={<DashboardLayout />}>
+          <Route index element={<DashboardHome />} />
+          <Route path="profile" element={<Profile />} />
+          <Route path="jobs" element={<Jobs />} />
+          <Route path="internships" element={<Internships />} />
+          <Route path="resume" element={<Resume />} />
+          <Route path="chatbot" element={<AIChatbot />} />
+          <Route path="settings" element={<Settings />} />
+          <Route path="interview" element={<Interviews />} />
+        </Route>
       </Route>
 
-      {/* Company Dashboard */}
-      <Route element={<CompanyRoutesWrapper />}>
-        <Route path="/company" element={<CompanyDashboard />} />
-        <Route path="/company/dashboard" element={<CompanyDashboard />} />
-        <Route path="/company/applicants" element={<Applicants />} />
-        <Route path="/company/applicants/:id" element={<ApplicantDetail />} />
-        <Route path="/company/profile" element={<CompanyProfile />} />
-        <Route path="/company/analytics" element={<Analytics />} />
-        <Route path="/company/job-postings" element={<JobPostings />} />
-        <Route path="/company/job-postings/:id" element={<JobDetail />} />
-        <Route path="/company/interview" element={<CompanyInterviews />} />
-        <Route path="/company/setting" element={<CompanySettings />} />
+      {/* Company Dashboard Protected */}
+      <Route element={<ProtectedRoute allowedRoles={["company"]} />}>
+        <Route element={<CompanyRoutesWrapper />}>
+          <Route path="/company" element={<CompanyDashboard />} />
+          <Route path="/company/dashboard" element={<CompanyDashboard />} />
+          <Route path="/company/applicants" element={<Applicants />} />
+          <Route path="/company/applicants/:id" element={<ApplicantDetail />} />
+          <Route path="/company/profile" element={<CompanyProfile />} />
+          <Route path="/company/analytics" element={<Analytics />} />
+          <Route path="/company/job-postings" element={<JobPostings />} />
+          <Route path="/company/job-postings/:id" element={<JobDetail />} />
+          <Route path="/company/interview" element={<CompanyInterviews />} />
+          <Route path="/company/setting" element={<CompanySettings />} />
+        </Route>
       </Route>
 
-      {/* Admin Dashboard */}
-      <Route path="/admin" element={<AdminLayout />}>
-        <Route index element={<AdminHome />} />
-        <Route path="users" element={<ManageUsers />} />
-        <Route path="companies" element={<ManageCompanies />} />
-        <Route path="jobs" element={<ManageJobs />} />
-        <Route path="applications" element={<Applications />} />
-        <Route path="interviews" element={<AdminInterviews />} />
-        <Route path="ai-insights" element={<AIInsights />} />
-        <Route path="reports" element={<Reports />} />
-        <Route path="notifications" element={<Notifications />} />
-        <Route path="settings" element={<AdminSettings />} />
+      {/* Admin Dashboard Protected */}
+      <Route element={<ProtectedRoute allowedRoles={["admin"]} />}>
+        <Route path="/admin" element={<AdminLayout />}>
+          <Route index element={<AdminHome />} />
+          <Route path="users" element={<ManageUsers />} />
+          <Route path="companies" element={<ManageCompanies />} />
+          <Route path="jobs" element={<ManageJobs />} />
+          <Route path="applications" element={<Applications />} />
+          <Route path="interviews" element={<AdminInterviews />} />
+          <Route path="ai-insights" element={<AIInsights />} />
+          <Route path="reports" element={<Reports />} />
+          <Route path="notifications" element={<Notifications />} />
+          <Route path="settings" element={<AdminSettings />} />
+        </Route>
       </Route>
     </Routes>
   );
 }
+
 
 export default App;

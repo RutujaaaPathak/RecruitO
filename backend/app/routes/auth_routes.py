@@ -1,17 +1,22 @@
-from fastapi import APIRouter, Depends, HTTPException
+# pyrefly: ignore [missing-import]
+from fastapi import APIRouter, Depends, HTTPException, status
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel, EmailStr
 import random
 import smtplib
 import os
 from email.mime.text import MIMEText
+# pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 
 from app.database import SessionLocal
 from app import models
-from app.utils import hash_password
+from app.utils import hash_password, verify_password
 from app.models import RoleEnum, EmailOTP
+from app.auth import create_access_token, get_current_user, RoleChecker
 
 # Load .env variables
 load_dotenv()
@@ -32,7 +37,13 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     role: RoleEnum
-    otp: str
+    otp: str = ""
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
 
 
 # ----------------------------
@@ -148,28 +159,31 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
             detail="Email already registered"
         )
 
-    # Get OTP record
-    otp_record = db.query(EmailOTP).filter(
-        EmailOTP.email == user.email,
-        EmailOTP.otp == user.otp
-    ).order_by(EmailOTP.id.desc()).first()
+    # Candidate role must be validated with OTP
+    if user.role == RoleEnum.user:
+        # Get OTP record
+        otp_record = db.query(EmailOTP).filter(
+            EmailOTP.email == user.email,
+            EmailOTP.otp == user.otp
+        ).order_by(EmailOTP.id.desc()).first()
 
-    if not otp_record:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid OTP"
-        )
+        if not otp_record:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid OTP"
+            )
 
-    # Check OTP expiry (5 minutes)
-    if datetime.utcnow() - otp_record.created_at > timedelta(minutes=5):
+        # Check OTP expiry (5 minutes)
+        if datetime.utcnow() - otp_record.created_at > timedelta(minutes=5):
+            db.delete(otp_record)
+            db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail="OTP expired. Please request a new OTP."
+            )
 
+        # Delete OTP after successful use
         db.delete(otp_record)
-        db.commit()
-
-        raise HTTPException(
-            status_code=400,
-            detail="OTP expired. Please request a new OTP."
-        )
 
     # Hash password
     try:
@@ -189,10 +203,6 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
     )
 
     db.add(new_user)
-
-    # Delete OTP after successful use
-    db.delete(otp_record)
-
     db.commit()
     db.refresh(new_user)
 
@@ -201,4 +211,75 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
         "name": new_user.name,
         "email": new_user.email,
         "role": new_user.role
+    }
+
+
+# ----------------------------
+# Login Route (Issues JWT with Role payload)
+# ----------------------------
+
+@router.post("/login")
+def login(request: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.email == request.email).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid email or password"
+        )
+
+    if not verify_password(request.password, user.password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid email or password"
+        )
+
+    # Create access token including email (sub), id, and role in the payload
+    access_token = create_access_token({
+        "sub": user.email,
+        "id": user.id,
+        "role": user.role.value,
+        "name": user.name
+    })
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "role": user.role.value,
+        "name": user.name
+    }
+
+
+# ----------------------------
+# Protected Example Routes (RBAC Verification)
+# ----------------------------
+
+@router.get("/api/user/profile")
+def get_user_profile(current_user: models.User = Depends(RoleChecker(["user", "company", "admin"]))):
+    return {
+        "message": "User profile accessed successfully",
+        "user": {
+            "id": current_user.id,
+            "name": current_user.name,
+            "email": current_user.email,
+            "role": current_user.role.value
+        }
+    }
+
+
+@router.get("/api/company/data")
+def get_company_data(current_user: models.User = Depends(RoleChecker(["company", "admin"]))):
+    return {
+        "message": "Company secure dashboard data",
+        "accessed_by": current_user.name
+    }
+
+
+@router.get("/api/admin/system-stats")
+def get_admin_stats(current_user: models.User = Depends(RoleChecker(["admin"]))):
+    return {
+        "message": "Admin system-wide reports and metrics",
+        "stats": {
+            "users_online": 14,
+            "system_status": "healthy"
+        }
     }

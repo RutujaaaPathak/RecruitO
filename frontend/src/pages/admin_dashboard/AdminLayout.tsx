@@ -1,9 +1,11 @@
 import { useNavigate, NavLink, Outlet } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { useAuthStore } from "../../store/AuthStore";
 
 export default function AdminLayout() {
   const navigate = useNavigate();
+  const logout = useAuthStore((state) => state.logout);
 
   const navItems = [
     { name: "Dashboard", path: "/admin" },
@@ -50,7 +52,10 @@ export default function AdminLayout() {
         <Button
           variant="destructive"
           className="mt-6 rounded-xl"
-          onClick={() => navigate("/signin")}
+          onClick={() => {
+            logout();
+            navigate("/signin");
+          }}
         >
           Logout
         </Button>

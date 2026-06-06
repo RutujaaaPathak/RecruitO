@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { useAuthStore } from "../../store/AuthStore";
 
 const SignIn = () => {
   const [email, setEmail] = useState("");
@@ -7,8 +8,9 @@ const SignIn = () => {
   const [error, setError] = useState("");
 
   const navigate = useNavigate();
+  const login = useAuthStore((state) => state.login);
 
-  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
 
     // Validation
@@ -20,12 +22,38 @@ const SignIn = () => {
     // Clear error
     setError("");
 
-    // Temporary success (backend later)
-    console.log("Login data:", { email, password });
+    try {
+      const response = await fetch("http://127.0.0.1:8000/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ email, password }),
+      });
 
-    // Redirect to dashboard
-    navigate("/dashboard");
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(data.detail || "Invalid email or password");
+        return;
+      }
+
+      // Store in Zustand AuthStore
+      login(data.access_token, data.role, data.name, email);
+
+      // Redirect based on role
+      if (data.role === "admin") {
+        navigate("/admin");
+      } else if (data.role === "company") {
+        navigate("/company/dashboard");
+      } else {
+        navigate("/dashboard");
+      }
+    } catch {
+      setError("Failed to connect to the login server. Please make sure the backend is running.");
+    }
   };
+
 
   return (
     <div
