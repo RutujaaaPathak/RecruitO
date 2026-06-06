@@ -8,11 +8,14 @@ import {
   BarChart3,
   Video,
   Settings,
+  LogOut,
 } from "lucide-react";
+import { useAuthStore } from "../../store/AuthStore";
 
 export default function Sidebar() {
   const navigate = useNavigate();
   const location = useLocation();
+  const logout = useAuthStore((state) => state.logout);
 
   return (
     <div
@@ -78,6 +81,15 @@ export default function Sidebar() {
           label="Settings"
           active={location.pathname === "/company/setting"}
           onClick={() => navigate("/company/setting")}
+        />
+
+        <Item
+          icon={<LogOut size={18} />}
+          label="Logout"
+          onClick={() => {
+            logout();
+            navigate("/signin");
+          }}
         />
       </nav>
 

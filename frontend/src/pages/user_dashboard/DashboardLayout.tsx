@@ -2,9 +2,11 @@ import { useNavigate, NavLink, Outlet } from "react-router-dom";
 import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { useAuthStore } from "../../store/AuthStore";
 
 export default function DashboardLayout() {
   const navigate = useNavigate();
+  const logout = useAuthStore((state) => state.logout);
 
   // Apply saved theme on mount
   useEffect(() => {
@@ -61,7 +63,10 @@ export default function DashboardLayout() {
         <Button
           variant="destructive"
           className="w-full mt-6"
-          onClick={() => navigate("/signin")}
+          onClick={() => {
+            logout();
+            navigate("/signin");
+          }}
         >
           Logout
         </Button>
