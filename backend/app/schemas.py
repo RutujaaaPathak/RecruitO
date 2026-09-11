@@ -217,6 +217,46 @@ class SemanticMatchOut(BaseModel):
 
 
 # -----------------------------
+# AI Career Recommendations
+# -----------------------------
+class SkillLearningPriority(BaseModel):
+    skill: str
+    reason: str = ""
+    priority: Literal["high", "medium", "low"] = "medium"
+
+
+class LearningStep(BaseModel):
+    step: str
+    detail: str = ""
+
+
+class ProjectIdea(BaseModel):
+    title: str
+    description: str = ""
+
+
+class CareerRecommendationsOut(BaseModel):
+    application_id: int
+    job_id: int
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    # Context used to ground the recommendations.
+    ats_score: Optional[int] = None
+    semantic_score: Optional[int] = None
+    matched_skills: List[str] = []
+    missing_skills: List[str] = []
+    # Generated plan (validated structured JSON).
+    summary: str = ""
+    priority_skills: List[SkillLearningPriority] = []
+    learning_path: List[LearningStep] = []
+    project_ideas: List[ProjectIdea] = []
+    resume_improvements: List[str] = []
+    # Source of the plan: "llm" or "fallback".
+    generated_by: Literal["llm", "fallback"] = "fallback"
+    notice: Optional[str] = None
+
+
+# -----------------------------
 # Interview
 # -----------------------------
 class InterviewCreate(BaseModel):

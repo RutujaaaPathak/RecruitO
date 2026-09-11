@@ -45,12 +45,49 @@ interface SemanticMatchData {
   explanation: string | null;
 }
 
+interface SkillLearningPriority {
+  skill: string;
+  reason: string;
+  priority: "high" | "medium" | "low";
+}
+
+interface LearningStep {
+  step: string;
+  detail: string;
+}
+
+interface ProjectIdea {
+  title: string;
+  description: string;
+}
+
+interface CareerRecommendations {
+  application_id: number;
+  job_id: number;
+  job_title: string | null;
+  company_name: string | null;
+  ats_score: number | null;
+  semantic_score: number | null;
+  matched_skills: string[];
+  missing_skills: string[];
+  summary: string;
+  priority_skills: SkillLearningPriority[];
+  learning_path: LearningStep[];
+  project_ideas: ProjectIdea[];
+  resume_improvements: string[];
+  generated_by: "llm" | "fallback";
+  notice: string | null;
+}
+
 export default function UserApplications() {
   const [applications, setApplications] = useState<ApplicationData[]>([]);
   const [skipGaps, setSkillGaps] = useState<Record<number, SkillGapReport | null>>({});
   const [gapErrors, setGapErrors] = useState<Record<number, string>>({});
   const [semanticMatches, setSemanticMatches] = useState<Record<number, SemanticMatchData | null>>({});
   const [semanticErrors, setSemanticErrors] = useState<Record<number, string>>({});
+  const [recommendations, setRecommendations] = useState<Record<number, CareerRecommendations | null>>({});
+  const [recLoading, setRecLoading] = useState<Record<number, boolean>>({});
+  const [recErrors, setRecErrors] = useState<Record<number, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -104,6 +141,29 @@ export default function UserApplications() {
       )
       .finally(() => setLoading(false));
   }, []);
+
+  const loadRecommendations = async (appId: number) => {
+    if (recLoading[appId] || recommendations[appId]) return;
+    setRecLoading((prev) => ({ ...prev, [appId]: true }));
+    setRecErrors((prev) => {
+      const next = { ...prev };
+      delete next[appId];
+      return next;
+    });
+    try {
+      const data = await api.get<CareerRecommendations>(
+        `/applications/${appId}/career-recommendations`
+      );
+      setRecommendations((prev) => ({ ...prev, [appId]: data }));
+    } catch (e) {
+      setRecErrors((prev) => ({
+        ...prev,
+        [appId]: e instanceof Error ? e.message : "Failed to generate recommendations",
+      }));
+    } finally {
+      setRecLoading((prev) => ({ ...prev, [appId]: false }));
+    }
+  };
 
   const scoreColor = (score: number) => {
     if (score >= 80) return "text-green-400";
@@ -162,6 +222,7 @@ export default function UserApplications() {
               gapErrors[app.id] ?? (app.match_score == null ? undefined : null);
             const semantic = semanticMatches[app.id];
             const semanticError = semanticErrors[app.id];
+            const rec = recommendations[app.id];
 
             return (
               <motion.div
@@ -343,6 +404,156 @@ export default function UserApplications() {
                   <div className="mt-5 p-3 rounded-xl bg-white/5 border border-white/10 text-white/50 text-xs">
                     Loading skill gap analysis...
                   </div>
+                )}
+
+                {/* AI CAREER RECOMMENDATIONS */}
+                {rec ? (
+                  <div className="mt-5 p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20">
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="text-sm font-semibold text-emerald-300">
+                        AI Career Recommendations
+                      </h3>
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-wider ${
+                          rec.generated_by === "llm"
+                            ? "bg-emerald-500/20 text-emerald-300"
+                            : "bg-yellow-500/20 text-yellow-300"
+                        }`}
+                      >
+                        {rec.generated_by === "llm"
+                          ? "AI Generated"
+                          : "Fallback"}
+                      </span>
+                    </div>
+
+                    {rec.summary && (
+                      <p className="text-white/70 text-xs mb-3">
+                        {rec.summary}
+                      </p>
+                    )}
+
+                    {rec.notice && (
+                      <p className="text-yellow-500/80 text-xs mb-3">
+                        {rec.notice}
+                      </p>
+                    )}
+
+                    {/* Priority skills */}
+                    {rec.priority_skills.length > 0 && (
+                      <div className="mb-3">
+                        <p className="text-xs text-emerald-400 font-medium mb-1">
+                          Priority Skills to Learn
+                        </p>
+                        <ul className="space-y-1.5">
+                          {rec.priority_skills.map((p: SkillLearningPriority, i: number) => (
+                            <li
+                              key={i}
+                              className="text-xs text-white/70 bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-2.5 py-1.5"
+                            >
+                              <span className="font-semibold text-emerald-300 capitalize">
+                                {p.skill}
+                              </span>
+                              <span className="mx-1.5 text-white/30">•</span>
+                              <span className="text-[10px] uppercase text-white/40">
+                                {p.priority}
+                              </span>
+                              <span className="block text-white/50 mt-0.5">
+                                {p.reason}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* Learning path */}
+                    {rec.learning_path.length > 0 && (
+                      <div className="mb-3">
+                        <p className="text-xs text-emerald-400 font-medium mb-1">
+                          Suggested Learning Path
+                        </p>
+                        <ol className="space-y-1.5">
+                          {rec.learning_path.map((step: LearningStep, i: number) => (
+                            <li
+                              key={i}
+                              className="text-xs text-white/70 bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5"
+                            >
+                              <span className="font-medium text-white/80">
+                                {i + 1}. {step.step}
+                              </span>
+                              {step.detail && (
+                                <span className="block text-white/50 mt-0.5">
+                                  {step.detail}
+                                </span>
+                              )}
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+
+                    {/* Project ideas */}
+                    {rec.project_ideas.length > 0 && (
+                      <div className="mb-3">
+                        <p className="text-xs text-emerald-400 font-medium mb-1">
+                          Relevant Project Ideas
+                        </p>
+                        <ul className="space-y-1.5">
+                          {rec.project_ideas.map((idea: ProjectIdea, i: number) => (
+                            <li
+                              key={i}
+                              className="text-xs text-white/70 bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5"
+                            >
+                              <span className="font-medium text-white/80">
+                                {idea.title}
+                              </span>
+                              {idea.description && (
+                                <span className="block text-white/50 mt-0.5">
+                                  {idea.description}
+                                </span>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* Resume improvements */}
+                    {rec.resume_improvements.length > 0 && (
+                      <div>
+                        <p className="text-xs text-emerald-400 font-medium mb-1">
+                          Resume Improvement Suggestions
+                        </p>
+                        <ul className="space-y-1.5">
+                          {rec.resume_improvements.map((tip: string, i: number) => (
+                            <li
+                              key={i}
+                              className="text-xs text-white/70 flex gap-1.5"
+                            >
+                              <span className="text-emerald-400">•</span>
+                              <span>{tip}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                ) : recLoading[app.id] ? (
+                  <div className="mt-5 p-3 rounded-xl bg-white/5 border border-white/10 text-white/50 text-xs">
+                    Generating AI career recommendations... this can take a few
+                    seconds.
+                  </div>
+                ) : recErrors[app.id] ? (
+                  <div className="mt-5 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs">
+                    {recErrors[app.id]}
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => loadRecommendations(app.id)}
+                    className="mt-5 w-full px-4 py-2.5 text-sm font-medium rounded-xl bg-emerald-600/20 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-600/30 transition"
+                  >
+                    Get AI Career Recommendations
+                  </button>
                 )}
               </motion.div>
             );
