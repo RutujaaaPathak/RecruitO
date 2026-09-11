@@ -214,6 +214,54 @@ Skill-gap analysis keeps using the rule-based skill matching described in task 1
 
 ---
 
+# AI Career Recommendations
+
+`GET /applications/{id}/career-recommendations` produces a personalized career
+plan for a candidate against a target job:
+
+```text
+Resume + Target Job
+        ↓
+matched skills + missing skills   (from the skill-gap analyzer, unchanged)
+        ↓
+LLM (backend-only)
+        ↓
+structured, Pydantic-validated JSON plan
+```
+
+The plan includes **priority skills to learn**, an **explanation for each skill
+gap**, a **suggested learning path**, **relevant project ideas**, and **resume
+improvement suggestions**. It is grounded in the existing signals: the matched
+and missing skills from `analyze_skill_gap`, the stored ATS `match_score`, and
+a freshly computed `semantic_score`.
+
+## Configuring the LLM (required for AI-generated plans)
+
+Add the backend-only API key to `backend/.env` (copy `.env.example`):
+
+```dotenv
+LLM_API_KEY=sk-your-backend-only-api-key
+LLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
+LLM_MODEL=gpt-4o-mini
+LLM_TIMEOUT=60
+```
+
+The key is read exclusively from the backend environment and is **never
+exposed to the frontend**: the browser only talks to our `/applications/...`
+endpoints, which return the validated plan (which never contains the key). The
+client is provider-agnostic (OpenAI, Azure OpenAI, OpenRouter, local servers).
+
+## Graceful degradation
+
+If `LLM_API_KEY` is unset, the provider errors, or the response cannot be
+parsed into the expected structure, the endpoint does **not** fail: it returns
+deterministic rule-based recommendations derived from the skill-gap analysis,
+with `generated_by="fallback"` and a `notice` explaining why. A successful LLM
+call returns `generated_by="llm"`. No RAG/retrieval is used yet; all context is
+provided inline in the prompt.
+
+---
+
 # Technology Stack
 
 ## Frontend
