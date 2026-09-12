@@ -9,6 +9,7 @@ from app.services.resume_parser import compute_match_score
 from app.services.skill_gap import analyze_skill_gap
 from app.services.semantic_matcher import compute_semantic_score
 from app.services.career_recommendations import generate_career_recommendations
+from app.services.resume_retriever import retrieve_chunks_for_job
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 
@@ -268,6 +269,69 @@ def get_application_semantic_match(
     )
 
 
+@router.get("/{application_id}/retrieved-chunks", response_model=schemas.RetrievedChunksOut)
+def get_application_retrieved_chunks(
+    application_id: int,
+    current_user: models.User = Depends(any_auth),
+    db: Session = Depends(get_db),
+):
+    """Retrieve the resume chunks most relevant to an application's job.
+
+    Uses pgvector cosine-distance retrieval over the candidate's latest resume.
+    Falls back silently to keyword scoring when embeddings are unavailable
+    (model offline / chunks not indexed). Access is scoped to the candidate who
+    owns the application and the hiring company / admin who manages it.
+    """
+    app_ = (
+        db.query(models.Application)
+        .filter(models.Application.id == application_id)
+        .first()
+    )
+    if app_ is None:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if not _can_manage(db, app_, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this application",
+        )
+
+    resume = (
+        db.query(models.Resume)
+        .filter(models.Resume.user_id == app_.user_id)
+        .order_by(models.Resume.uploaded_at.desc())
+        .first()
+    )
+    if resume is None or not resume.parsed_text:
+        raise HTTPException(
+            status_code=404, detail="No resume available for retrieval"
+        )
+
+    chunks, model_used, used_fallback = retrieve_chunks_for_job(
+        db, resume, app_.job.description or ""
+    )
+
+    return schemas.RetrievedChunksOut(
+        application_id=app_.id,
+        job_id=app_.job_id,
+        job_title=app_.job.title if app_.job else None,
+        company_name=(
+            app_.job.company.name if app_.job and app_.job.company else None
+        ),
+        model_used=model_used,
+        used_fallback=used_fallback,
+        chunks=[
+            schemas.RetrievedChunkOut(
+                chunk_id=c.chunk_id,
+                chunk_index=c.chunk_index,
+                section=c.section,
+                score=c.score,
+                content=c.content,
+            )
+            for c in chunks
+        ],
+    )
+
+
 @router.get("/{application_id}/career-recommendations", response_model=schemas.CareerRecommendationsOut)
 def get_career_recommendations(
     application_id: int,
@@ -316,6 +380,10 @@ def get_career_recommendations(
             resume.parsed_text, app_.job.description
         ).score
 
+    retrieved_chunks, _, _ = retrieve_chunks_for_job(
+        db, resume, app_.job.description or ""
+    )
+
     plan = generate_career_recommendations(
         resume_text=resume.parsed_text,
         job_skills=app_.job.skills or [],
@@ -323,6 +391,7 @@ def get_career_recommendations(
         job_title=app_.job.title if app_.job else None,
         ats_score=app_.match_score,
         semantic_score=semantic_score,
+        retrieved_chunks=retrieved_chunks,
     )
 
     return schemas.CareerRecommendationsOut(
@@ -343,6 +412,7 @@ def get_career_recommendations(
         resume_improvements=plan.get("resume_improvements", []),
         generated_by=plan.get("generated_by", "fallback"),
         notice=plan.get("notice"),
+        sources=[schemas.ChunkSource(**s) for s in plan.get("sources", [])],
     )
 
 

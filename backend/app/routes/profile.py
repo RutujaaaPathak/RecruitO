@@ -1,6 +1,7 @@
 # pyrefly: ignore [missing-import]
 import os
 import uuid
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -14,6 +15,7 @@ from app.services.resume_parser import (
     ResumeParseError,
     extract_text_from_bytes,
 )
+from app.services.resume_retriever import index_resume_chunks
 
 router = APIRouter(tags=["profile"])
 
@@ -111,6 +113,16 @@ def upload_resume(
         parsed_text=parsed_text,
     )
     db.add(resume)
+    # Flush to get resume.id, then build the RAG index (chunk + embed). Indexing
+    # is best-effort: if embedding/vector storage fails the upload still succeeds
+    # and retrieval simply falls back to keyword scoring for these chunks.
+    try:
+        db.flush()
+        index_resume_chunks(db, resume)
+    except Exception as exc:
+        logging.getLogger("recruito").warning(
+            "Resume indexing failed (chunks skipped): %s", exc
+        )
     db.commit()
     db.refresh(resume)
     return resume

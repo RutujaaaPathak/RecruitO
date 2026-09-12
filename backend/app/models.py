@@ -17,6 +17,14 @@ from app.database import Base
 import enum
 from datetime import datetime
 
+# pgvector: SQLAlchemy type for the resume-chunk embedding column. Requires the
+# `pgvector` python package + the `vector` PostgreSQL extension.
+from pgvector.sqlalchemy import Vector  # pyrefly: ignore [missing-import]
+
+# Dimension of the embeddings produced by the All-MiniLM-L6-v2 model shared with
+# the semantic matcher. Columns and migrations must stay in sync with this.
+VECTOR_DIM = 384
+
 
 # -----------------------------
 # Enums
@@ -162,6 +170,42 @@ class Resume(Base):
     uploaded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     user = relationship("User", back_populates="resumes")
+    chunks = relationship(
+        "ResumeChunk",
+        back_populates="resume",
+        cascade="all, delete-orphan",
+        order_by="ResumeChunk.chunk_index",
+    )
+
+
+# -----------------------------
+# Resume chunks (RAG index)
+# -----------------------------
+class ResumeChunk(Base):
+    """One indexed section of a parsed resume, with an embedding for retrieval.
+
+    Populated when a resume is uploaded. `embedding` is a `VECTOR(384)` pgvector
+    column (All-MiniLM-L6-v2). It is NULL when the embedding model was
+    unavailable at upload time; retrieval then falls back to keyword scoring.
+    """
+
+    __tablename__ = "resume_chunks"
+    __table_args__ = (
+        UniqueConstraint("resume_id", "chunk_index", name="uq_resume_chunk_index"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    resume_id = Column(
+        Integer, ForeignKey("resumes.id"), nullable=False, index=True
+    )
+    chunk_index = Column(Integer, nullable=False)
+    section = Column(String, nullable=True)
+    content = Column(Text, nullable=False)
+    token_count = Column(Integer, nullable=True)
+    embedding = Column(Vector(VECTOR_DIM), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    resume = relationship("Resume", back_populates="chunks")
 
 
 # -----------------------------
