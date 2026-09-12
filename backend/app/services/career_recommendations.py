@@ -55,10 +55,18 @@ def build_prompt(
     missing_skills: List[str],
     ats_score: Optional[int],
     semantic_score: Optional[int],
+    retrieved_resume_context: Optional[str] = None,
 ) -> str:
     """Compose the prompt that feeds structured context into the LLM."""
     ats = f"{ats_score}/100" if ats_score is not None else "N/A"
     semantic = f"{semantic_score}/100" if semantic_score is not None else "N/A"
+    retrieved_section = ""
+    if retrieved_resume_context:
+        retrieved_section = f"""
+RETRIEVED RESUME SECTIONS (the most relevant parts of the resume for this role,
+retrieved from the RAG index — ground your recommendations in these):
+{retrieved_resume_context}
+"""
     return f"""{SYSTEM_PROMPT}
 
 JOB TITLE: {job_title or "N/A"}
@@ -71,7 +79,7 @@ REQUIRED SKILLS:
 
 RESUME TEXT:
 {resume_text or "N/A"}
-
+{retrieved_section}
 MATCHED SKILLS (already present in the resume):
 {", ".join(matched_skills) if matched_skills else "None"}
 
@@ -310,6 +318,49 @@ def _fallback_summary(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def _format_retrieved_resume_context(retrieved_chunks: Optional[List]) -> Optional[str]:
+    """Render retrieved chunks into the prompt's grounded resume context."""
+    if not retrieved_chunks:
+        return None
+    parts: List[str] = []
+    for index, chunk in enumerate(retrieved_chunks, start=1):
+        if isinstance(chunk, dict):
+            section = chunk.get("section") or f"chunk {index}"
+            content = chunk.get("content", "")
+        else:
+            section = getattr(chunk, "section", None) or f"chunk {index}"
+            content = getattr(chunk, "content", "")
+        parts.append(f"--- Resume section: {section} ---\n{content}")
+    return "\n\n".join(parts)
+
+
+def _to_sources(retrieved_chunks: Optional[List]) -> List[Dict[str, Any]]:
+    """Normalize retrieved chunks into source references for the response."""
+    sources: List[Dict[str, Any]] = []
+    for chunk in retrieved_chunks or []:
+        if isinstance(chunk, dict):
+            sources.append(
+                {
+                    "chunk_id": chunk.get("chunk_id"),
+                    "chunk_index": chunk.get("chunk_index", 0),
+                    "section": chunk.get("section"),
+                    "score": chunk.get("score"),
+                    "content": (chunk.get("content") or "")[:2000],
+                }
+            )
+        else:
+            sources.append(
+                {
+                    "chunk_id": getattr(chunk, "chunk_id", None),
+                    "chunk_index": getattr(chunk, "chunk_index", 0),
+                    "section": getattr(chunk, "section", None),
+                    "score": getattr(chunk, "score", None),
+                    "content": (getattr(chunk, "content", "") or "")[:2000],
+                }
+            )
+    return sources
+
+
 def generate_career_recommendations(
     resume_text: str,
     job_skills: Optional[List[str]],
@@ -318,13 +369,16 @@ def generate_career_recommendations(
     ats_score: Optional[int] = None,
     semantic_score: Optional[int] = None,
     llm_call=None,
+    retrieved_chunks: Optional[List] = None,
 ) -> Dict[str, Any]:
     """Produce a career recommendations plan for a resume against a job.
 
     The skill-gap analysis is always run first (existing logic, unchanged).
-    The LLM is then asked to personalize the plan; on any failure a rule-based
-    fallback is returned. `llm_call` is injectable for tests and defaults to
-    the production LLM client's `generate_json`.
+    When `retrieved_chunks` is provided (RAG), the most relevant resume sections
+    are injected into the prompt and returned as `sources`. The LLM is then
+    asked to personalize the plan; on any failure a rule-based fallback is
+    returned. `llm_call` is injectable for tests and defaults to the production
+    LLM client's `generate_json`.
 
     Returns a dict serializable through the `CareerRecommendationsOut` schema.
     """
@@ -334,6 +388,9 @@ def generate_career_recommendations(
 
     if llm_call is None:
         llm_call = llm_client.generate_json
+
+    sources = _to_sources(retrieved_chunks)
+    retrieved_context = _format_retrieved_resume_context(retrieved_chunks)
 
     try:
         prompt = build_prompt(
@@ -345,6 +402,7 @@ def generate_career_recommendations(
             missing_skills=missing_skills,
             ats_score=ats_score,
             semantic_score=semantic_score,
+            retrieved_resume_context=retrieved_context,
         )
         raw = llm_call(prompt, system=SYSTEM_PROMPT)
         plan = parse_llm_recommendations(raw)
@@ -363,6 +421,7 @@ def generate_career_recommendations(
         plan["notice"] = None
         plan["matched_skills"] = matched_skills
         plan["missing_skills"] = missing_skills
+        plan["sources"] = sources
         return plan
     except Exception as exc:
         plan = build_fallback_recommendations(
@@ -372,6 +431,7 @@ def generate_career_recommendations(
         plan["notice"] = f"{FALLBACK_NOTICE} ({_safe_reason(exc)})"
         plan["matched_skills"] = matched_skills
         plan["missing_skills"] = missing_skills
+        plan["sources"] = sources
         return plan
 
 

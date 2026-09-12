@@ -254,6 +254,35 @@ class CareerRecommendationsOut(BaseModel):
     # Source of the plan: "llm" or "fallback".
     generated_by: Literal["llm", "fallback"] = "fallback"
     notice: Optional[str] = None
+    # RAG sources: the retrieved resume chunks used to ground the plan.
+    sources: List["ChunkSource"] = []
+
+
+class ChunkSource(BaseModel):
+    chunk_id: int
+    chunk_index: int
+    section: Optional[str] = None
+    score: Optional[int] = None
+    content: str
+
+
+class RetrievedChunkOut(BaseModel):
+    chunk_id: int
+    chunk_index: int
+    section: Optional[str] = None
+    score: Optional[int] = None
+    content: str
+
+
+class RetrievedChunksOut(BaseModel):
+    application_id: int
+    job_id: int
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    # Embedding model used for retrieval, or "fallback"/"none".
+    model_used: str = "none"
+    used_fallback: bool = False
+    chunks: List[RetrievedChunkOut] = []
 
 
 # -----------------------------

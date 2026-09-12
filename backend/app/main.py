@@ -22,11 +22,20 @@ from app.routes import (
     admin,
 )
 
+from sqlalchemy import text
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(name)-20s  %(levelname)-7s  %(message)s",
 )
 logging.getLogger("recruito").setLevel(logging.INFO)
+
+# Ensure the pgvector extension exists before bootstrap create_all so the
+# VECTOR columns on `resume_chunks` can be created. Idempotent; migrations
+# (`0002_resume_chunks`) also create it for deployed environments.
+with engine.connect() as conn:
+    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    conn.commit()
 
 # Create tables (idempotent bootstrap). Prefer Alembic migrations for schema
 # changes; this ensures a fresh checkout can start in development.
