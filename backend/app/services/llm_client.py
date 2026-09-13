@@ -82,6 +82,68 @@ def _extract_json(text: str) -> Dict[str, Any]:
 # Public API
 # ---------------------------------------------------------------------------
 
+def generate_text(
+    prompt: str,
+    system: Optional[str] = None,
+    temperature: float = 0.7,
+) -> str:
+    """Call the configured LLM and return the raw text reply.
+
+    Used for free-form (conversational) output such as the RAG chatbot. Shares
+    the exact configuration, error handling and payload shape of
+    ``generate_json`` but returns the model's raw ``content`` verbatim instead
+    of JSON-extracting it.
+
+    Raises LLMNotConfigured when LLM_API_KEY is missing, and LLMError for any
+    network/HTTP problem. Callers are expected to catch these and fall back
+    gracefully.
+    """
+    settings = llm_settings()
+    if not settings["api_key"]:
+        raise LLMNotConfigured(
+            "LLM_API_KEY is not set. Add it to backend/.env. "
+            "The key is only ever used server-side and must never be exposed "
+            "to the frontend."
+        )
+
+    url = f"{settings['base_url']}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {settings['api_key']}",
+        "Content-Type": "application/json",
+    }
+    payload: Dict[str, Any] = {
+        "model": settings["model"],
+        "temperature": temperature,
+        "messages": [
+            {
+                "role": "system",
+                "content": system or "You are a helpful assistant.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+    try:
+        with httpx.Client(timeout=_timeout_seconds(settings)) as client:
+            resp = client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise LLMError(
+            f"LLM API returned HTTP {exc.response.status_code}: "
+            f"{exc.response.text[:500]}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise LLMError(f"LLM API request failed: {exc}") from exc
+
+    try:
+        body = resp.json()
+        content = body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise LLMError("LLM response was missing choices[0].message.content.") from exc
+
+    return content
+
+
 def generate_json(prompt: str, system: Optional[str] = None) -> Dict[str, Any]:
     """Call the configured LLM and return a parsed JSON object.
 

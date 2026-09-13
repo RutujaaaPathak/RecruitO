@@ -20,6 +20,8 @@ from app.routes import (
     interviews,
     profile,
     admin,
+    chat,
+    mock_interviews,
 )
 
 from sqlalchemy import text
@@ -59,6 +61,8 @@ app.include_router(jobs.router)
 app.include_router(applications.router)
 app.include_router(interviews.router)
 app.include_router(profile.router)
+app.include_router(chat.router)
+app.include_router(mock_interviews.router)
 app.include_router(admin.router)
 
 @app.get("/")

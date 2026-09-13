@@ -1,5 +1,5 @@
 # pyrefly: ignore [missing-import]
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List, Literal
 from datetime import datetime, date
 
@@ -8,6 +8,7 @@ from app.models import (
     JobStatusEnum,
     ApplicationStatusEnum,
     InterviewStatusEnum,
+    MockInterviewStatusEnum,
 )
 
 
@@ -319,3 +320,140 @@ class InterviewOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# -----------------------------
+# AI Chatbot
+# -----------------------------
+class ChatSendIn(BaseModel):
+    message: str
+    # Optional application context; forwarded to the RAG pipeline when given.
+    application_id: Optional[int] = None
+    # Optional existing session to continue; a new session is created when absent.
+    session_id: Optional[int] = None
+
+
+class ChatMessageOut(BaseModel):
+    id: int
+    role: str
+    content: str
+    sources: List[ChunkSource] = []
+    model_used: Optional[str] = None
+    generated_by: Optional[str] = None
+    created_at: datetime
+
+
+class ChatSessionOut(BaseModel):
+    id: int
+    application_id: Optional[int] = None
+    title: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatReplyOut(BaseModel):
+    session_id: int
+    application_id: Optional[int] = None
+    message: ChatMessageOut
+    sources: List[ChunkSource] = []
+    generated_by: Literal["llm", "fallback"] = "fallback"
+    notice: Optional[str] = None
+    model_used: str = "none"
+
+
+# -----------------------------
+# AI Mock Interview
+# -----------------------------
+class MockInterviewStartIn(BaseModel):
+    application_id: int
+
+
+class MockInterviewAnswerIn(BaseModel):
+    answer_text: str = Field(..., min_length=1, max_length=6000)
+
+
+class MockInterviewQuestionOut(BaseModel):
+    id: int
+    question_index: int
+    category: str
+    question_text: str
+    generated_by: Literal["llm", "fallback"] = "fallback"
+    notice: Optional[str] = None
+    sources: List[ChunkSource] = []
+
+
+class EvaluationOut(BaseModel):
+    score: int  # 0-10
+    correctness: str = ""
+    strengths: List[str] = []
+    weaknesses: List[str] = []
+    missing_points: List[str] = []
+    feedback: str = ""
+    generated_by: Literal["llm", "fallback"] = "fallback"
+    notice: Optional[str] = None
+
+
+class AnsweredQuestionOut(BaseModel):
+    question: MockInterviewQuestionOut
+    answer: str
+    evaluation: EvaluationOut
+
+
+class CategoryScoreOut(BaseModel):
+    category: str
+    score: int = 0
+    comment: str = ""
+
+
+class MockInterviewReportOut(BaseModel):
+    overall_score: int = 0
+    category_scores: List[CategoryScoreOut] = []
+    strengths: List[str] = []
+    weaknesses: List[str] = []
+    recommended_topics: List[str] = []
+    summary: str = ""
+    generated_by: Literal["llm", "fallback"] = "fallback"
+    notice: Optional[str] = None
+
+
+class MockInterviewListOut(BaseModel):
+    id: int
+    application_id: int
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    status: MockInterviewStatusEnum
+    max_questions: int
+    answered_count: int = 0
+    overall_score: Optional[int] = None
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MockInterviewDetailOut(BaseModel):
+    id: int
+    application_id: int
+    user_id: int
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    status: MockInterviewStatusEnum
+    max_questions: int
+    current_question: Optional[MockInterviewQuestionOut] = None
+    answered: List[AnsweredQuestionOut] = []
+    matched_skills: List[str] = []
+    missing_skills: List[str] = []
+    model_used: str = "none"
+    used_fallback: bool = False
+    report: Optional[MockInterviewReportOut] = None
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MockInterviewAnswerResponse(BaseModel):
+    interview: MockInterviewDetailOut
+    evaluation: EvaluationOut
+    next_question: Optional[MockInterviewQuestionOut] = None
+    report: Optional[MockInterviewReportOut] = None
