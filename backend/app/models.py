@@ -90,6 +90,12 @@ class User(Base):
     applications = relationship(
         "Application", back_populates="user", cascade="all, delete-orphan"
     )
+    chat_sessions = relationship(
+        "ChatSession", back_populates="user", cascade="all, delete-orphan"
+    )
+    mock_interviews = relationship(
+        "MockInterview", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 # -----------------------------
@@ -238,6 +244,9 @@ class Application(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    mock_interviews = relationship(
+        "MockInterview", back_populates="application", cascade="all, delete-orphan"
+    )
 
 
 # -----------------------------
@@ -284,3 +293,172 @@ class EmailOTP(Base):
     otp = Column(String, nullable=False)
     # Timestamp used for OTP expiry check
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+# -----------------------------
+# AI Chatbot: conversation sessions + messages
+# -----------------------------
+class ChatSession(Base):
+    """One candidate chatbot conversation, anchored to an optional application.
+
+    Stores the selected application context (`application_id`) so every turn in
+    the session is grounded in the same job. A session always belongs to the
+    authenticated candidate (`user_id`); ownership is enforced at the route layer.
+    """
+
+    __tablename__ = "chat_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id"), nullable=False, index=True
+    )
+    application_id = Column(
+        Integer, ForeignKey("applications.id"), nullable=True, index=True
+    )
+    title = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    user = relationship("User", back_populates="chat_sessions")
+    messages = relationship(
+        "ChatMessage",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="ChatMessage.id",
+    )
+
+
+class ChatMessage(Base):
+    """A single persisted turn (user question or assistant reply) in a session.
+
+    `role` is "user" or "assistant". Assistant messages carry the retrieved
+    resume-chunk `sources` that grounded the reply, plus the `model_used` and
+    `generated_by` (llm|fallback) metadata for transparency.
+    """
+
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(
+        Integer, ForeignKey("chat_sessions.id"), nullable=False, index=True
+    )
+    role = Column(String, nullable=False)  # "user" | "assistant"
+    content = Column(Text, nullable=False)
+    sources = Column(JSON, nullable=True)
+    model_used = Column(String, nullable=True)
+    generated_by = Column(String, nullable=True)  # "llm" | "fallback"
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    session = relationship("ChatSession", back_populates="messages")
+
+
+# -----------------------------
+# AI Mock Interview: sessions + questions
+# -----------------------------
+class MockInterviewStatusEnum(str, enum.Enum):
+    in_progress = "in_progress"
+    completed = "completed"
+
+
+class MockInterview(Base):
+    """One text-based AI mock interview session for an application.
+
+    Anchored to the candidate's application (and therefore its job) so every
+    question is grounded in the same resume + job context. Stores the RAG
+    sources and skill-gap snapshot used at start time for auditability, and the
+    final report once the interview is completed.
+    """
+
+    __tablename__ = "mock_interviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    application_id = Column(
+        Integer, ForeignKey("applications.id"), nullable=False, index=True
+    )
+    status = Column(
+        Enum(MockInterviewStatusEnum, name="mockinterviewstatusenum"),
+        default=MockInterviewStatusEnum.in_progress,
+        nullable=False,
+    )
+    # Fixed at creation so the question count is stable across refreshes.
+    max_questions = Column(Integer, default=8, nullable=False)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Final report (populated when the interview is completed).
+    overall_score = Column(Integer, nullable=True)  # 0-10
+    category_scores = Column(JSON, nullable=True)
+    strengths = Column(JSON, nullable=True)
+    weaknesses = Column(JSON, nullable=True)
+    recommended_topics = Column(JSON, nullable=True)
+    summary = Column(Text, nullable=True)
+    report = Column(JSON, nullable=True)  # raw validated report (audit)
+    report_generated_by = Column(String, nullable=True)  # "llm" | "fallback"
+    report_notice = Column(Text, nullable=True)
+
+    # Auditability: the grounded context captured at session start.
+    skill_gap = Column(JSON, nullable=True)  # {"matched": [...], "missing": [...]}
+    sources = Column(JSON, nullable=True)  # retrieved resume chunks (RAG)
+    model_used = Column(String, nullable=True)
+    used_fallback = Column(Boolean, default=False, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    user = relationship("User", back_populates="mock_interviews")
+    application = relationship("Application", back_populates="mock_interviews")
+    questions = relationship(
+        "MockInterviewQuestion",
+        back_populates="interview",
+        cascade="all, delete-orphan",
+        order_by="MockInterviewQuestion.question_index",
+    )
+
+
+class MockInterviewQuestion(Base):
+    """One grounded interview question and, after answering, its evaluation.
+
+    `category` is one of: technical, project_experience, problem_solving,
+    behavioral (rotated by the service). The unanswered question in a session
+    is the "current" question; resuming a session picks it up again.
+    """
+
+    __tablename__ = "mock_interview_questions"
+    __table_args__ = (
+        UniqueConstraint(
+            "interview_id", "question_index", name="uq_mock_interview_question_index"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    interview_id = Column(
+        Integer, ForeignKey("mock_interviews.id"), nullable=False, index=True
+    )
+    question_index = Column(Integer, nullable=False)
+    category = Column(String, nullable=False)
+    question_text = Column(Text, nullable=False)
+    generated_by = Column(String, nullable=True)  # "llm" | "fallback"
+    notice = Column(Text, nullable=True)
+    question_sources = Column(JSON, nullable=True)  # RAG chunks grounding it
+
+    # Candidate answer + AI evaluation.
+    answer_text = Column(Text, nullable=True)
+    score = Column(Integer, nullable=True)  # 0-10
+    correctness = Column(Text, nullable=True)
+    strengths = Column(JSON, nullable=True)
+    weaknesses = Column(JSON, nullable=True)
+    missing_points = Column(JSON, nullable=True)
+    feedback = Column(Text, nullable=True)
+    evaluation = Column(JSON, nullable=True)  # raw validated evaluation (audit)
+    evaluation_generated_by = Column(String, nullable=True)  # "llm" | "fallback"
+    evaluation_notice = Column(Text, nullable=True)
+    evaluated_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    interview = relationship("MockInterview", back_populates="questions")
