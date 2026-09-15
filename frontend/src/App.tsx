@@ -13,6 +13,8 @@ import Internships from "./pages/user_dashboard/Internships";
 import Resume from "./pages/user_dashboard/Resume";
 import AIChatbot from "./pages/user_dashboard/AIChatbot";
 import MockInterview from "./pages/user_dashboard/MockInterview";
+import MCQAssessment from "./pages/user_dashboard/MCQAssessment";
+import CodingTest from "./pages/user_dashboard/CodingTest";
 import Settings from "./pages/user_dashboard/Settings";
 import Interviews from "./pages/user_dashboard/Interviews";
 import UserApplications from "./pages/user_dashboard/UserApplications";
@@ -70,6 +72,8 @@ function App() {
           <Route path="resume" element={<Resume />} />
           <Route path="chatbot" element={<AIChatbot />} />
           <Route path="mock-interview" element={<MockInterview />} />
+          <Route path="mcq-assessment" element={<MCQAssessment />} />
+          <Route path="coding-test" element={<CodingTest />} />
           <Route path="settings" element={<Settings />} />
           <Route path="interview" element={<Interviews />} />
         </Route>

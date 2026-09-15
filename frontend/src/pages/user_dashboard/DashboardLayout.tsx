@@ -41,6 +41,8 @@ export default function DashboardLayout() {
     { name: "Resume", path: "/dashboard/resume" },
     { name: "AI Chatbot", path: "/dashboard/chatbot" },
     { name: "Mock Interview", path: "/dashboard/mock-interview" },
+    { name: "MCQ Assessment", path: "/dashboard/mcq-assessment" },
+    { name: "Coding Test", path: "/dashboard/coding-test" },
     { name: "Settings", path: "/dashboard/settings" },
     
   ];
