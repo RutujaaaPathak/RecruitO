@@ -9,6 +9,8 @@ from app.models import (
     ApplicationStatusEnum,
     InterviewStatusEnum,
     MockInterviewStatusEnum,
+    AssessmentStatusEnum,
+    CodingTestStatusEnum,
 )
 
 
@@ -457,3 +459,201 @@ class MockInterviewAnswerResponse(BaseModel):
     evaluation: EvaluationOut
     next_question: Optional[MockInterviewQuestionOut] = None
     report: Optional[MockInterviewReportOut] = None
+
+
+# -----------------------------
+# AI MCQ Assessment
+# -----------------------------
+class McqAssessmentStartIn(BaseModel):
+    application_id: int
+
+
+class McqAnswerIn(BaseModel):
+    question_index: int = Field(..., ge=0)
+    selected_option: int = Field(..., ge=0, le=3)
+
+
+class McqQuestionOut(BaseModel):
+    """A question as delivered to the candidate DURING the test.
+
+    Deliberately omits ``correct_option_index`` so correct answers are never
+    exposed before submission. ``selected_option`` is the candidate's own saved
+    choice (their data), not the answer key.
+    """
+
+    id: int
+    question_index: int
+    category: str
+    question_text: str
+    options: List[str]  # exactly 4; correct answer is never in this payload
+    generated_by: Literal["llm", "fallback"] = "fallback"
+    notice: Optional[str] = None
+    selected_option: Optional[int] = None  # 0-3
+
+
+class McqCategoryPerformanceOut(BaseModel):
+    category: str
+    total: int
+    correct: int
+    percentage: int
+
+
+class McqResultsOut(BaseModel):
+    score: int
+    total: int
+    percentage: int  # 0-100
+    correct_count: int
+    incorrect_count: int
+    unanswered_count: int
+    passed: bool
+    pass_percentage: int
+    category_performance: List[McqCategoryPerformanceOut] = []
+    expired: bool = False  # True when the timer ran out before submit
+    model_used: str = "none"
+    generated_by: Literal["llm", "mixed", "fallback"] = "fallback"
+    used_fallback: bool = False
+    notice: Optional[str] = None
+
+
+class McqAssessmentListOut(BaseModel):
+    id: int
+    application_id: int
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    status: AssessmentStatusEnum
+    total_questions: int
+    answered_count: int = 0
+    time_limit_minutes: int
+    score: Optional[int] = None
+    percentage: Optional[int] = None
+    passed: Optional[bool] = None
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class McqAssessmentDetailOut(BaseModel):
+    id: int
+    application_id: int
+    user_id: int
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    status: AssessmentStatusEnum
+    total_questions: int
+    answered_count: int = 0
+    time_limit_minutes: int
+    started_at: datetime
+    expires_at: Optional[datetime] = None
+    questions: List[McqQuestionOut] = []
+    results: Optional[McqResultsOut] = None
+    generated_by: Literal["llm", "mixed", "fallback"] = "fallback"
+    used_fallback: bool = False
+    model_used: str = "none"
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+# -----------------------------
+# Coding Test
+# -----------------------------
+class CodingTestStartIn(BaseModel):
+    application_id: int
+
+
+class CodingRunIn(BaseModel):
+    language: Literal["python", "java", "cpp"]
+    code: str = Field(..., min_length=1)
+    problem_index: int = Field(..., ge=0)
+
+
+class CodingSubmitIn(CodingRunIn):
+    pass
+
+
+class CodingTestCaseResultOut(BaseModel):
+    case_index: int
+    passed: bool
+    status: str  # passed | wrong_answer | runtime_error | timeout | compile_error
+    stdout: str = ""
+    stderr: str = ""
+    time_ms: int = 0
+
+
+class CodingRunOut(BaseModel):
+    problem_index: int
+    language: str
+    compile_error: bool = False
+    compile_stderr: str = ""
+    test_results: List[CodingTestCaseResultOut] = []
+
+
+class CodingSubmissionOut(BaseModel):
+    problem_index: int
+    language: str
+    status: str  # passed | failed | error | timeout
+    passed_cases: int
+    total_cases: int
+    score: int  # 0-100
+    execution_time_ms: Optional[int] = None
+    error_message: Optional[str] = None
+    results: List[CodingTestCaseResultOut] = []
+    created_at: datetime
+
+
+class CodingProblemOut(BaseModel):
+    """A problem as delivered to the candidate DURING the test.
+
+    Deliberately omits ``hidden_cases`` so graded cases are never exposed.
+    ``sample_cases`` are public (shown in the problem statement).
+    """
+
+    id: int
+    problem_index: int
+    title: str
+    category: str
+    difficulty: str
+    description: str
+    input_format: str
+    output_format: str
+    constraints: str
+    sample_cases: List[dict]
+    supported_languages: List[str]
+    submission: Optional[CodingSubmissionOut] = None
+
+
+class CodingTestListOut(BaseModel):
+    id: int
+    application_id: int
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    status: CodingTestStatusEnum
+    total_problems: int
+    solved_count: int
+    score: Optional[int] = None
+    passed: Optional[bool] = None
+    pass_percentage: int
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CodingTestDetailOut(BaseModel):
+    id: int
+    application_id: int
+    user_id: int
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    status: CodingTestStatusEnum
+    total_problems: int
+    solved_count: int
+    score: Optional[int] = None
+    passed: Optional[bool] = None
+    pass_percentage: int
+    problems: List[CodingProblemOut] = []
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime

@@ -96,6 +96,15 @@ class User(Base):
     mock_interviews = relationship(
         "MockInterview", back_populates="user", cascade="all, delete-orphan"
     )
+    mcq_assessments = relationship(
+        "McqAssessment", back_populates="user", cascade="all, delete-orphan"
+    )
+    coding_tests = relationship(
+        "CodingTest", back_populates="user", cascade="all, delete-orphan"
+    )
+    coding_submissions = relationship(
+        "CodingSubmission", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 # -----------------------------
@@ -246,6 +255,12 @@ class Application(Base):
     )
     mock_interviews = relationship(
         "MockInterview", back_populates="application", cascade="all, delete-orphan"
+    )
+    mcq_assessments = relationship(
+        "McqAssessment", back_populates="application", cascade="all, delete-orphan"
+    )
+    coding_tests = relationship(
+        "CodingTest", back_populates="application", cascade="all, delete-orphan"
     )
 
 
@@ -462,3 +477,278 @@ class MockInterviewQuestion(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     interview = relationship("MockInterview", back_populates="questions")
+
+
+# -----------------------------
+# AI MCQ Assessment: tests + questions + candidate answers
+# -----------------------------
+class AssessmentStatusEnum(str, enum.Enum):
+    in_progress = "in_progress"
+    completed = "completed"
+
+
+class CodingTestStatusEnum(str, enum.Enum):
+    in_progress = "in_progress"
+    completed = "completed"
+
+
+class McqAssessment(Base):
+    """One timed, 20-question multiple-choice assessment anchored to an
+    application (and therefore a job). Questions are generated per-attempt by
+    the LLM (grounded in the candidate's resume + job) or by a deterministic
+    fallback question bank, and persisted with their correct answer so results
+    can be computed server-side at submission/expiry time.
+
+    The candidate's selected options live in `answers`. Correct answers are
+    stored on `McqQuestion.correct_option_index` but are NEVER serialized — the
+    API only ever returns the four options (and the candidate's own selection).
+    """
+
+    __tablename__ = "mcq_assessments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    application_id = Column(
+        Integer, ForeignKey("applications.id"), nullable=False, index=True
+    )
+    status = Column(
+        Enum(AssessmentStatusEnum, name="assessmentstatusenum"),
+        default=AssessmentStatusEnum.in_progress,
+        nullable=False,
+    )
+    total_questions = Column(Integer, default=20, nullable=False)
+    time_limit_minutes = Column(Integer, default=20, nullable=False)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+    # True when the test was finalized automatically because the timer ran out.
+    expired = Column(Boolean, default=False, nullable=False)
+
+    # Final results (populated when the assessment is completed).
+    score = Column(Integer, nullable=True)  # number of correct answers
+    total_scored = Column(Integer, nullable=True)  # max possible score
+    percentage = Column(Integer, nullable=True)  # 0-100
+    correct_count = Column(Integer, nullable=True)
+    incorrect_count = Column(Integer, nullable=True)
+    unanswered_count = Column(Integer, nullable=True)
+    passed = Column(Boolean, nullable=True)
+    pass_percentage = Column(Integer, nullable=True)  # threshold used
+    category_performance = Column(JSON, nullable=True)  # aggregate by category
+    result_notice = Column(Text, nullable=True)
+
+    # Transparency: how the questions were produced.
+    generated_by = Column(String, nullable=True)  # "llm" | "mixed" | "fallback"
+    model_used = Column(String, nullable=True)
+    used_fallback = Column(Boolean, default=False, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    user = relationship("User", back_populates="mcq_assessments")
+    application = relationship("Application", back_populates="mcq_assessments")
+    questions = relationship(
+        "McqQuestion",
+        back_populates="assessment",
+        cascade="all, delete-orphan",
+        order_by="McqQuestion.question_index",
+    )
+    answers = relationship(
+        "McqAnswer",
+        back_populates="assessment",
+        cascade="all, delete-orphan",
+    )
+
+
+class McqQuestion(Base):
+    """One persisted MCQ question for an assessment.
+
+    `options` holds exactly four answer strings; `correct_option_index` holds
+    the single correct option. The correct index is server-side only and is
+    never included in any API response.
+    """
+
+    __tablename__ = "mcq_questions"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_id", "question_index", name="uq_mcq_question_index"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    assessment_id = Column(
+        Integer, ForeignKey("mcq_assessments.id"), nullable=False, index=True
+    )
+    question_index = Column(Integer, nullable=False)
+    category = Column(String, nullable=False)
+    question_text = Column(Text, nullable=False)
+    options = Column(JSON, nullable=False)  # exactly 4 strings
+    correct_option_index = Column(Integer, nullable=False)  # server-side only
+    generated_by = Column(String, nullable=True)  # "llm" | "fallback"
+    notice = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    assessment = relationship("McqAssessment", back_populates="questions")
+
+
+class McqAnswer(Base):
+    """The candidate's selected option for one question of one assessment.
+
+    `(assessment_id, question_id)` is unique: an answer is an upsert, never a
+    second row, so double-submissions cannot create duplicate rows.
+    """
+
+    __tablename__ = "mcq_answers"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_id", "question_id", name="uq_mcq_answer_question"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    assessment_id = Column(
+        Integer, ForeignKey("mcq_assessments.id"), nullable=False, index=True
+    )
+    question_id = Column(
+        Integer, ForeignKey("mcq_questions.id"), nullable=False, index=True
+    )
+    selected_option = Column(Integer, nullable=False)  # 0-3
+    is_correct = Column(Boolean, nullable=False)  # snapshot at answer time
+    answered_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    assessment = relationship("McqAssessment", back_populates="answers")
+    question = relationship("McqQuestion")
+
+
+# -----------------------------
+# Coding Test: tests + problems + submissions
+# -----------------------------
+class CodingTest(Base):
+    """One coding test session anchored to a candidate's application.
+
+    Created from a deterministic question bank of programming problems.  Each
+    problem carries sample cases (shown to the candidate) plus hidden cases
+    (used only server-side for scoring — never serialized).
+    """
+
+    __tablename__ = "coding_tests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    application_id = Column(
+        Integer, ForeignKey("applications.id"), nullable=False, index=True
+    )
+    status = Column(
+        Enum(CodingTestStatusEnum, name="codingteststatusenum"),
+        default=CodingTestStatusEnum.in_progress,
+        nullable=False,
+    )
+    total_problems = Column(Integer, nullable=False)
+    solved_count = Column(Integer, default=0, nullable=False)
+    # Final aggregate results (populated when the test is completed).
+    score = Column(Integer, nullable=True)
+    passed = Column(Boolean, nullable=True)
+    pass_percentage = Column(Integer, nullable=False)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    user = relationship("User", back_populates="coding_tests")
+    application = relationship("Application", back_populates="coding_tests")
+    problems = relationship(
+        "CodingProblem",
+        back_populates="test",
+        cascade="all, delete-orphan",
+        order_by="CodingProblem.problem_index",
+    )
+    submissions = relationship(
+        "CodingSubmission",
+        back_populates="test",
+        cascade="all, delete-orphan",
+    )
+
+
+class CodingProblem(Base):
+    """One programming problem for a coding test.
+
+    ``sample_cases`` are shown to the candidate; ``hidden_cases`` are the
+    grading tests, stored server-side and NEVER serialized.
+    """
+
+    __tablename__ = "coding_problems"
+    __table_args__ = (
+        UniqueConstraint(
+            "coding_test_id", "problem_index", name="uq_coding_problem_index"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    coding_test_id = Column(
+        Integer, ForeignKey("coding_tests.id"), nullable=False, index=True
+    )
+    problem_index = Column(Integer, nullable=False)
+    title = Column(String, nullable=False)
+    category = Column(String, nullable=False)
+    difficulty = Column(String, nullable=False)  # easy | medium | hard
+    description = Column(Text, nullable=False)
+    input_format = Column(Text, nullable=False)
+    output_format = Column(Text, nullable=False)
+    constraints = Column(Text, nullable=False)
+    sample_cases = Column(JSON, nullable=False)  # [{"input", "expected"}]
+    hidden_cases = Column(JSON, nullable=False)  # server-side only
+    time_limit_seconds = Column(Integer, default=5, nullable=False)
+    supported_languages = Column(
+        JSON, nullable=False, default=["python", "java", "cpp"]
+    )
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    test = relationship("CodingTest", back_populates="problems")
+    submissions = relationship(
+        "CodingSubmission", back_populates="problem", cascade="all, delete-orphan"
+    )
+
+
+class CodingSubmission(Base):
+    """The candidate's latest code + grading result for one problem.
+
+    ``(coding_test_id, problem_id)`` is unique: a submit overwrites the
+    previous submission for that problem rather than creating a duplicate row.
+    """
+
+    __tablename__ = "coding_submissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "coding_test_id", "problem_id", name="uq_coding_submission_problem"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    coding_test_id = Column(
+        Integer, ForeignKey("coding_tests.id"), nullable=False, index=True
+    )
+    problem_id = Column(
+        Integer, ForeignKey("coding_problems.id"), nullable=False, index=True
+    )
+    user_id = Column(
+        Integer, ForeignKey("users.id"), nullable=False, index=True
+    )
+    language = Column(String, nullable=False)  # python | java | cpp
+    code = Column(Text, nullable=False)
+    status = Column(String, nullable=False)  # passed | failed | error | timeout
+    passed_cases = Column(Integer, nullable=False)
+    total_cases = Column(Integer, nullable=False)
+    score = Column(Integer, nullable=False)  # 0-100
+    execution_time_ms = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    results = Column(JSON, nullable=True)  # per-case pass/fail detail
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    test = relationship("CodingTest", back_populates="submissions")
+    problem = relationship("CodingProblem", back_populates="submissions")
+    user = relationship("User", back_populates="coding_submissions")
