@@ -657,3 +657,97 @@ class CodingTestDetailOut(BaseModel):
     completed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+
+
+# -----------------------------
+# Aptitude Test
+# -----------------------------
+class AptitudeTestStartIn(BaseModel):
+    application_id: int
+
+
+class AptitudeAnswerIn(BaseModel):
+    question_index: int = Field(..., ge=0)
+    selected_option: int = Field(..., ge=0, le=3)
+
+
+class AptitudeQuestionOut(BaseModel):
+    """A question as delivered to the candidate DURING the test.
+
+    Deliberately omits ``correct_option_index`` so correct answers are never
+    exposed before submission. ``selected_option`` is the candidate's own saved
+    choice (their data), not the answer key.
+    """
+
+    id: int
+    question_index: int
+    category: str  # quantitative | logical_reasoning | verbal
+    question_text: str
+    options: List[str]  # exactly 4; correct answer is never in this payload
+    generated_by: Literal["llm", "fallback"] = "fallback"
+    notice: Optional[str] = None
+    selected_option: Optional[int] = None  # 0-3
+
+
+class AptitudeCategoryPerformanceOut(BaseModel):
+    category: str
+    total: int
+    correct: int
+    percentage: int
+
+
+class AptitudeResultsOut(BaseModel):
+    score: int
+    total: int
+    percentage: int  # 0-100
+    correct_count: int
+    incorrect_count: int
+    unanswered_count: int
+    passed: bool
+    pass_percentage: int
+    category_performance: List[AptitudeCategoryPerformanceOut] = []
+    expired: bool = False  # True when the timer ran out before submit
+    model_used: str = "none"
+    generated_by: Literal["llm", "mixed", "fallback"] = "fallback"
+    used_fallback: bool = False
+    notice: Optional[str] = None
+
+
+class AptitudeTestListOut(BaseModel):
+    id: int
+    application_id: int
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    status: AssessmentStatusEnum
+    total_questions: int
+    answered_count: int = 0
+    time_limit_minutes: int
+    score: Optional[int] = None
+    percentage: Optional[int] = None
+    passed: Optional[bool] = None
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AptitudeTestDetailOut(BaseModel):
+    id: int
+    application_id: int
+    user_id: int
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    status: AssessmentStatusEnum
+    total_questions: int
+    answered_count: int = 0
+    time_limit_minutes: int
+    started_at: datetime
+    expires_at: Optional[datetime] = None
+    questions: List[AptitudeQuestionOut] = []
+    results: Optional[AptitudeResultsOut] = None
+    generated_by: Literal["llm", "mixed", "fallback"] = "fallback"
+    used_fallback: bool = False
+    model_used: str = "none"
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime

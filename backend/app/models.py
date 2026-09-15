@@ -105,6 +105,9 @@ class User(Base):
     coding_submissions = relationship(
         "CodingSubmission", back_populates="user", cascade="all, delete-orphan"
     )
+    aptitude_tests = relationship(
+        "AptitudeTest", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 # -----------------------------
@@ -261,6 +264,9 @@ class Application(Base):
     )
     coding_tests = relationship(
         "CodingTest", back_populates="application", cascade="all, delete-orphan"
+    )
+    aptitude_tests = relationship(
+        "AptitudeTest", back_populates="application", cascade="all, delete-orphan"
     )
 
 
@@ -752,3 +758,136 @@ class CodingSubmission(Base):
     test = relationship("CodingTest", back_populates="submissions")
     problem = relationship("CodingProblem", back_populates="submissions")
     user = relationship("User", back_populates="coding_submissions")
+
+
+# -----------------------------
+# Aptitude Test: tests + questions + answers
+# -----------------------------
+class AptitudeTest(Base):
+    """One timed, 20-question aptitude test anchored to a candidate's
+    application (and therefore a job). Questions span three fixed sections —
+    quantitative, logical reasoning and verbal — and are generated per-attempt
+    by the LLM (grounded in the candidate's resume + job) or by a deterministic
+    fallback question bank. The correct answer is persisted server-side only.
+
+    Reuses AssessmentStatusEnum (in_progress | completed) so the shared
+    PostgreSQL enum type stays a single source of truth across assessments.
+    """
+
+    __tablename__ = "aptitude_tests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    application_id = Column(
+        Integer, ForeignKey("applications.id"), nullable=False, index=True
+    )
+    status = Column(
+        Enum(AssessmentStatusEnum, name="assessmentstatusenum"),
+        default=AssessmentStatusEnum.in_progress,
+        nullable=False,
+    )
+    total_questions = Column(Integer, default=20, nullable=False)
+    time_limit_minutes = Column(Integer, default=20, nullable=False)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+    # True when the test was finalized automatically because the timer ran out.
+    expired = Column(Boolean, default=False, nullable=False)
+
+    # Final results (populated when the test is completed).
+    score = Column(Integer, nullable=True)  # number of correct answers
+    total_scored = Column(Integer, nullable=True)  # max possible score
+    percentage = Column(Integer, nullable=True)  # 0-100
+    correct_count = Column(Integer, nullable=True)
+    incorrect_count = Column(Integer, nullable=True)
+    unanswered_count = Column(Integer, nullable=True)
+    passed = Column(Boolean, nullable=True)
+    pass_percentage = Column(Integer, nullable=True)  # threshold used
+    category_performance = Column(JSON, nullable=True)  # aggregate by category
+    result_notice = Column(Text, nullable=True)
+
+    # Transparency: how the questions were produced.
+    generated_by = Column(String, nullable=True)  # "llm" | "mixed" | "fallback"
+    model_used = Column(String, nullable=True)
+    used_fallback = Column(Boolean, default=False, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    user = relationship("User", back_populates="aptitude_tests")
+    application = relationship("Application", back_populates="aptitude_tests")
+    questions = relationship(
+        "AptitudeQuestion",
+        back_populates="test",
+        cascade="all, delete-orphan",
+        order_by="AptitudeQuestion.question_index",
+    )
+    answers = relationship(
+        "AptitudeAnswer",
+        back_populates="test",
+        cascade="all, delete-orphan",
+    )
+
+
+class AptitudeQuestion(Base):
+    """One persisted aptitude MCQ question for a test.
+
+    ``options`` holds exactly four answer strings; ``correct_option_index``
+    holds the single correct option. The correct index is server-side only and
+    is never included in any API response.
+    """
+
+    __tablename__ = "aptitude_questions"
+    __table_args__ = (
+        UniqueConstraint(
+            "aptitude_test_id", "question_index", name="uq_aptitude_question_index"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    aptitude_test_id = Column(
+        Integer, ForeignKey("aptitude_tests.id"), nullable=False, index=True
+    )
+    question_index = Column(Integer, nullable=False)
+    category = Column(String, nullable=False)  # quantitative|logical_reasoning|verbal
+    question_text = Column(Text, nullable=False)
+    options = Column(JSON, nullable=False)  # exactly 4 strings
+    correct_option_index = Column(Integer, nullable=False)  # server-side only
+    generated_by = Column(String, nullable=True)  # "llm" | "fallback"
+    notice = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    test = relationship("AptitudeTest", back_populates="questions")
+    answers = relationship(
+        "AptitudeAnswer", back_populates="question", cascade="all, delete-orphan"
+    )
+
+
+class AptitudeAnswer(Base):
+    """The candidate's selected option for one question of one test.
+
+    ``(aptitude_test_id, question_id)`` is unique: an answer is an upsert, never
+    a second row, so double-submissions cannot create duplicate rows.
+    """
+
+    __tablename__ = "aptitude_answers"
+    __table_args__ = (
+        UniqueConstraint(
+            "aptitude_test_id", "question_id", name="uq_aptitude_answer_question"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    aptitude_test_id = Column(
+        Integer, ForeignKey("aptitude_tests.id"), nullable=False, index=True
+    )
+    question_id = Column(
+        Integer, ForeignKey("aptitude_questions.id"), nullable=False, index=True
+    )
+    selected_option = Column(Integer, nullable=False)  # 0-3
+    is_correct = Column(Boolean, nullable=False)  # snapshot at answer time
+    answered_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    test = relationship("AptitudeTest", back_populates="answers")
+    question = relationship("AptitudeQuestion", back_populates="answers")
