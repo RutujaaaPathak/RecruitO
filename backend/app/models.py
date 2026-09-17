@@ -108,6 +108,9 @@ class User(Base):
     aptitude_tests = relationship(
         "AptitudeTest", back_populates="user", cascade="all, delete-orphan"
     )
+    video_interviews = relationship(
+        "VideoInterview", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 # -----------------------------
@@ -267,6 +270,9 @@ class Application(Base):
     )
     aptitude_tests = relationship(
         "AptitudeTest", back_populates="application", cascade="all, delete-orphan"
+    )
+    video_interviews = relationship(
+        "VideoInterview", back_populates="application", cascade="all, delete-orphan"
     )
 
 
@@ -444,6 +450,11 @@ class MockInterview(Base):
 class MockInterviewQuestion(Base):
     """One grounded interview question and, after answering, its evaluation.
 
+    Shared by the text-based AI mock interview and the technical video
+    interview. ``interview_id`` anchors it to a mock interview,
+    ``video_interview_id`` anchors it to a video session (exactly one of the
+    two is set).
+
     `category` is one of: technical, project_experience, problem_solving,
     behavioral (rotated by the service). The unanswered question in a session
     is the "current" question; resuming a session picks it up again.
@@ -454,11 +465,19 @@ class MockInterviewQuestion(Base):
         UniqueConstraint(
             "interview_id", "question_index", name="uq_mock_interview_question_index"
         ),
+        UniqueConstraint(
+            "video_interview_id",
+            "question_index",
+            name="uq_video_interview_question_index",
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     interview_id = Column(
-        Integer, ForeignKey("mock_interviews.id"), nullable=False, index=True
+        Integer, ForeignKey("mock_interviews.id"), nullable=True, index=True
+    )
+    video_interview_id = Column(
+        Integer, ForeignKey("video_interviews.id"), nullable=True, index=True
     )
     question_index = Column(Integer, nullable=False)
     category = Column(String, nullable=False)
@@ -483,6 +502,7 @@ class MockInterviewQuestion(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     interview = relationship("MockInterview", back_populates="questions")
+    video_interview = relationship("VideoInterview", back_populates="questions")
 
 
 # -----------------------------
@@ -891,3 +911,50 @@ class AptitudeAnswer(Base):
 
     test = relationship("AptitudeTest", back_populates="answers")
     question = relationship("AptitudeQuestion", back_populates="answers")
+
+
+# -----------------------------
+# Technical Video Interview: a candidate's live interview session
+# -----------------------------
+class VideoInterview(Base):
+    """A technical video interview session anchored to one of the candidate's
+    applications.
+
+    The room persists camera + microphone enablement and the session
+    start/end timestamps so an interrupted session can be resumed. The live
+    questions, candidate answers and AI evaluations are stored on the shared
+    ``mock_interview_questions`` table via ``video_interview_id``.
+
+    Reuses AssessmentStatusEnum (in_progress | completed) so the shared
+    PostgreSQL enum type stays a single source of truth across assessments.
+    """
+
+    __tablename__ = "video_interviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    application_id = Column(
+        Integer, ForeignKey("applications.id"), nullable=False, index=True
+    )
+    status = Column(
+        Enum(AssessmentStatusEnum, name="assessmentstatusenum"),
+        default=AssessmentStatusEnum.in_progress,
+        nullable=False,
+    )
+    camera_enabled = Column(Boolean, default=True, nullable=False)
+    microphone_enabled = Column(Boolean, default=True, nullable=False)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    ended_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    user = relationship("User", back_populates="video_interviews")
+    application = relationship("Application", back_populates="video_interviews")
+    questions = relationship(
+        "MockInterviewQuestion",
+        back_populates="video_interview",
+        cascade="all, delete-orphan",
+        order_by="MockInterviewQuestion.question_index",
+    )

@@ -751,3 +751,75 @@ class AptitudeTestDetailOut(BaseModel):
     completed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+
+
+# -----------------------------
+# Technical Video Interview
+# -----------------------------
+class VideoInterviewStartIn(BaseModel):
+    """Body used to create a video interview session for an application.
+
+    The camera/microphone enablement is recorded from the candidate's live
+    device state at the moment the room is entered.
+    """
+
+    application_id: int
+    camera_enabled: bool = True
+    microphone_enabled: bool = True
+
+
+class VideoInterviewDeviceStateIn(BaseModel):
+    """The candidate's current camera/microphone toggles, synced from the room."""
+
+    camera_enabled: bool
+    microphone_enabled: bool
+
+
+class VideoInterviewAnswerIn(BaseModel):
+    """Body used to submit the candidate's text answer to the current
+    technical video-interview question."""
+
+    answer_text: str = Field(..., min_length=1, max_length=6000)
+
+
+class VideoInterviewListOut(BaseModel):
+    id: int
+    application_id: int
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    status: AssessmentStatusEnum
+    camera_enabled: bool
+    microphone_enabled: bool
+    started_at: datetime
+    ended_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class VideoInterviewDetailOut(BaseModel):
+    id: int
+    application_id: int
+    user_id: int
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    status: AssessmentStatusEnum
+    camera_enabled: bool
+    microphone_enabled: bool
+    max_questions: int = 0
+    answered_count: int = 0
+    current_question: Optional[MockInterviewQuestionOut] = None
+    answered: List[AnsweredQuestionOut] = []
+    started_at: datetime
+    ended_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class VideoInterviewAnswerResponse(BaseModel):
+    """Response after the candidate answers the current question: the refreshed
+    session (with the new current question and updated history), the evaluation
+    of the answered question, and the next question when available."""
+
+    session: VideoInterviewDetailOut
+    evaluation: EvaluationOut
+    next_question: Optional[MockInterviewQuestionOut] = None
