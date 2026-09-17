@@ -43,6 +43,8 @@ export default function DashboardLayout() {
     { name: "Mock Interview", path: "/dashboard/mock-interview" },
     { name: "MCQ Assessment", path: "/dashboard/mcq-assessment" },
     { name: "Coding Test", path: "/dashboard/coding-test" },
+    { name: "Aptitude Test", path: "/dashboard/aptitude-test" },
+    { name: "Video Interview", path: "/dashboard/video-interview" },
     { name: "Settings", path: "/dashboard/settings" },
     
   ];

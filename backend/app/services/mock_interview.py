@@ -859,10 +859,17 @@ def build_question_row(
     category: str,
     question_result: Dict[str, Any],
     sources: List[Dict[str, Any]],
+    video_interview_id: Optional[int] = None,
 ) -> MockInterviewQuestion:
-    """Construct an (unsaved) MockInterviewQuestion ORM object."""
+    """Construct an (unsaved) MockInterviewQuestion ORM object.
+
+    Anchor the question to a text-based mock interview via ``interview_id``, or
+    to a technical video interview session via ``video_interview_id`` (exactly
+    one of the two is set).
+    """
     return MockInterviewQuestion(
         interview_id=interview_id,
+        video_interview_id=video_interview_id,
         question_index=question_index,
         category=category,
         question_text=question_result["question_text"],

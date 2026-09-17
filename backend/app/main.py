@@ -24,6 +24,8 @@ from app.routes import (
     mock_interviews,
     mcq_assessments,
     coding_tests,
+    aptitude_tests,
+    video_interviews,
 )
 
 from sqlalchemy import text
@@ -67,6 +69,8 @@ app.include_router(chat.router)
 app.include_router(mock_interviews.router)
 app.include_router(mcq_assessments.router)
 app.include_router(coding_tests.router)
+app.include_router(aptitude_tests.router)
+app.include_router(video_interviews.router)
 app.include_router(admin.router)
 
 @app.get("/")

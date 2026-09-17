@@ -15,6 +15,8 @@ import AIChatbot from "./pages/user_dashboard/AIChatbot";
 import MockInterview from "./pages/user_dashboard/MockInterview";
 import MCQAssessment from "./pages/user_dashboard/MCQAssessment";
 import CodingTest from "./pages/user_dashboard/CodingTest";
+import AptitudeTest from "./pages/user_dashboard/AptitudeTest";
+import VideoInterview from "./pages/user_dashboard/VideoInterview";
 import Settings from "./pages/user_dashboard/Settings";
 import Interviews from "./pages/user_dashboard/Interviews";
 import UserApplications from "./pages/user_dashboard/UserApplications";
@@ -74,6 +76,8 @@ function App() {
           <Route path="mock-interview" element={<MockInterview />} />
           <Route path="mcq-assessment" element={<MCQAssessment />} />
           <Route path="coding-test" element={<CodingTest />} />
+          <Route path="aptitude-test" element={<AptitudeTest />} />
+          <Route path="video-interview" element={<VideoInterview />} />
           <Route path="settings" element={<Settings />} />
           <Route path="interview" element={<Interviews />} />
         </Route>
