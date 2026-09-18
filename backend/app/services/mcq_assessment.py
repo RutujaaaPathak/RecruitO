@@ -13,7 +13,7 @@ only ever returns the four options plus the candidate's own selection. Scoring
 happens entirely backend-side at submission, or automatically when the timer
 expires (backend-enforced deadline = `started_at + time_limit_minutes`).
 
-This module deliberately does NOT import the (paused) RAG chatbot. It reuses
+This module deliberately does NOT import the RAG chatbot. It reuses
 the shared low-level context helpers from the mock interview module so the
 assessment stays grounded but decoupled.
 """

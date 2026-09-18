@@ -27,11 +27,15 @@ logger = logging.getLogger("recruito.auth")
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 
-# TEMPORARY: bypass email OTP verification during signup so users can register
-# and log in without an SMTP service. The OTP code below is fully intact and is
-# only skipped when this is enabled. To re-enable email verification, set
-# BYPASS_EMAIL_OTP=false in .env (or flip this default back to False).
-BYPASS_EMAIL_OTP = os.getenv("BYPASS_EMAIL_OTP", "true").strip().lower() in ("1", "true", "yes", "on")
+# Candidate signup email OTP verification. SECURE DEFAULT: ON (required).
+#
+# OTP verification is implemented and fully preserved; when enabled, candidate
+# signup requires a valid, unexpired 6-digit OTP and the SMTP service in
+# .env (EMAIL_ADDRESS / EMAIL_PASSWORD) must be configured to send it.
+#
+# For LOCAL DEVELOPMENT / TESTING only, set BYPASS_EMAIL_OTP=true in .env to
+# skip sending and checking the OTP. Production must leave it unset or false.
+BYPASS_EMAIL_OTP = os.getenv("BYPASS_EMAIL_OTP", "false").strip().lower() in ("1", "true", "yes", "on")
 
 router = APIRouter()
 
@@ -73,11 +77,17 @@ def send_email_otp(receiver_email: str, otp: str):
 
     if not sender_email or not sender_password:
         logger.error(
-            "OTP email failed: EMAIL_ADDRESS or EMAIL_PASSWORD is not set in .env"
+            "OTP email failed: EMAIL_ADDRESS or EMAIL_PASSWORD is not set in .env "
+            "(candidate signup OTP is required by default)."
         )
         raise HTTPException(
             status_code=500,
-            detail="Email service is not configured. Please set EMAIL_ADDRESS and EMAIL_PASSWORD in .env",
+            detail=(
+                "Email service is not configured and candidate signup OTP is "
+                "required. Set EMAIL_ADDRESS and EMAIL_PASSWORD in .env (use a "
+                "Gmail App Password), or for local development/testing only set "
+                "BYPASS_EMAIL_OTP=true in .env to skip OTP."
+            ),
         )
 
     subject = "RecruitO OTP Verification"

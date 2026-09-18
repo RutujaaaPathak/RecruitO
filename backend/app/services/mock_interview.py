@@ -19,7 +19,7 @@ failure each stage (question generation, evaluation, final report) degrades to
 a deterministic, fully grounded rule-based fallback so the interview always
 works.
 
-This module deliberately does NOT import the (paused) RAG chatbot service. It
+This module deliberately does NOT import the RAG chatbot service. It
 assembles its own small context block from the shared low-level helpers so the
 mock interview stays decoupled from the chatbot.
 """
