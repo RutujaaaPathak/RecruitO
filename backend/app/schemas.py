@@ -759,11 +759,14 @@ class AptitudeTestDetailOut(BaseModel):
 class VideoInterviewStartIn(BaseModel):
     """Body used to create a video interview session for an application.
 
-    The camera/microphone enablement is recorded from the candidate's live
-    device state at the moment the room is entered.
+    ``interview_type`` selects the interview flavour: ``"technical"`` (default)
+    for the technical AI interview or ``"hr"`` for the HR mock interview. The
+    camera/microphone enablement is recorded from the candidate's live device
+    state at the moment the room is entered.
     """
 
     application_id: int
+    interview_type: Literal["technical", "hr"] = "technical"
     camera_enabled: bool = True
     microphone_enabled: bool = True
 
@@ -785,11 +788,13 @@ class VideoInterviewAnswerIn(BaseModel):
 class VideoInterviewListOut(BaseModel):
     id: int
     application_id: int
+    interview_type: str = "technical"
     job_title: Optional[str] = None
     company_name: Optional[str] = None
     status: AssessmentStatusEnum
     camera_enabled: bool
     microphone_enabled: bool
+    overall_score: Optional[int] = None
     started_at: datetime
     ended_at: Optional[datetime] = None
     created_at: datetime
@@ -800,6 +805,7 @@ class VideoInterviewDetailOut(BaseModel):
     id: int
     application_id: int
     user_id: int
+    interview_type: str = "technical"
     job_title: Optional[str] = None
     company_name: Optional[str] = None
     status: AssessmentStatusEnum
@@ -809,6 +815,14 @@ class VideoInterviewDetailOut(BaseModel):
     answered_count: int = 0
     current_question: Optional[MockInterviewQuestionOut] = None
     answered: List[AnsweredQuestionOut] = []
+    overall_score: Optional[int] = None
+    category_scores: List[CategoryScoreOut] = []
+    strengths: List[str] = []
+    weaknesses: List[str] = []
+    recommended_topics: List[str] = []
+    summary: str = ""
+    report_generated_by: Literal["llm", "fallback"] = "fallback"
+    report_notice: Optional[str] = None
     started_at: datetime
     ended_at: Optional[datetime] = None
     created_at: datetime

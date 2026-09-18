@@ -420,3 +420,78 @@ def test_build_question_row_anchors_to_video_interview():
     assert row.question_index == 2
     assert row.category == "problem_solving"
     assert row.question_text == "Walk me through a hard bug you fixed."
+
+
+# ---------------------------------------------------------------------------
+# HR mode + final report serialization
+# ---------------------------------------------------------------------------
+
+def _completed_hr_with_report():
+    """A finished HR session whose report columns are all populated."""
+    return _labeled_session(
+        interview_type="hr",
+        status=AssessmentStatusEnum.completed,
+        ended_at=datetime(2026, 1, 1, 10, 40, 0),
+        report={
+            "overall_score": 8,
+            "category_scores": [
+                {"category": "communication", "score": 8, "comment": "good"}
+            ],
+            "strengths": ["Clear communicator"],
+            "weaknesses": ["Skips concrete examples"],
+            "recommended_topics": ["STAR answers"],
+            "summary": "Strong overall fit for the role.",
+        },
+        overall_score=8,
+        category_scores=[
+            {"category": "communication", "score": 8, "comment": "good"}
+        ],
+        strengths=["Clear communicator"],
+        weaknesses=["Skips concrete examples"],
+        recommended_topics=["STAR answers"],
+        summary="Strong overall fit for the role.",
+        report_generated_by="llm",
+        report_notice=None,
+    )
+
+
+def test_detail_exposes_interview_type_and_hr_report():
+    out = _detail(_completed_hr_with_report())
+    assert out.interview_type == "hr"
+    assert out.status == AssessmentStatusEnum.completed
+    assert out.overall_score == 8
+    assert out.category_scores[0].category == "communication"
+    assert out.strengths == ["Clear communicator"]
+    assert out.recommended_topics == ["STAR answers"]
+    assert out.summary.startswith("Strong overall fit")
+    assert out.report_generated_by == "llm"
+    assert out.report_notice is None
+
+
+def test_detail_technical_default_exposed_and_report_absent_while_live():
+    live = _detail(_labeled_session())
+    assert live.interview_type == "technical"
+    assert live.overall_score is None
+    assert live.category_scores == []
+    assert live.strengths == []
+    assert live.summary == ""
+    assert live.report_generated_by == "fallback"
+    assert live.report_notice is None
+
+
+def test_list_out_exposes_type_and_score_only_when_reported():
+    live = _list_out(_labeled_session(interview_type="hr"))
+    assert live.interview_type == "hr"
+    assert live.overall_score is None
+
+    done = _list_out(_completed_hr_with_report())
+    assert done.interview_type == "hr"
+    assert done.overall_score == 8
+
+
+def test_reused_hr_report_prompt_matches_mock_interview_persona():
+    # HR video sessions reuse the shared HR report persona defined in the mock
+    # interview engine so reports are consistent across assessment flavours.
+    from app.services.mock_interview import HR_REPORT_SYSTEM_PROMPT
+
+    assert "HR interviewer inside RecruitO" in HR_REPORT_SYSTEM_PROMPT

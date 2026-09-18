@@ -12,10 +12,13 @@ from app.services.video_interview import (
 from app.services.mock_interview import (
     _snapshot_sources,
     apply_evaluation,
+    apply_report,
+    build_qa_pairs,
     build_question_row,
     category_for_index,
     evaluate_answer,
     generate_question,
+    generate_report,
     max_questions,
     resolve_interview_context,
 )
@@ -119,13 +122,40 @@ def _job_label(session: models.VideoInterview) -> tuple:
     )
 
 
+def _report_out(
+    session: models.VideoInterview,
+) -> schemas.MockInterviewReportOut | None:
+    """The session's final report, or None when the interview is not complete."""
+    if getattr(session, "status", None) != models.AssessmentStatusEnum.completed:
+        return None
+    if not getattr(session, "report", None):
+        return None
+    return schemas.MockInterviewReportOut(
+        overall_score=getattr(session, "overall_score", None) or 0,
+        category_scores=[
+            schemas.CategoryScoreOut(**c)
+            for c in (getattr(session, "category_scores", None) or [])
+        ],
+        strengths=getattr(session, "strengths", None) or [],
+        weaknesses=getattr(session, "weaknesses", None) or [],
+        recommended_topics=getattr(session, "recommended_topics", None) or [],
+        summary=getattr(session, "summary", None) or "",
+        generated_by=(
+            "llm" if getattr(session, "report_generated_by", None) == "llm" else "fallback"
+        ),
+        notice=getattr(session, "report_notice", None),
+    )
+
+
 def _detail(session: models.VideoInterview) -> schemas.VideoInterviewDetailOut:
     job_title, company_name = _job_label(session)
     current = _current_question(session)
+    report = _report_out(session)
     return schemas.VideoInterviewDetailOut(
         id=session.id,
         application_id=session.application_id,
         user_id=session.user_id,
+        interview_type=getattr(session, "interview_type", None) or "technical",
         job_title=job_title,
         company_name=company_name,
         status=session.status,
@@ -135,6 +165,14 @@ def _detail(session: models.VideoInterview) -> schemas.VideoInterviewDetailOut:
         answered_count=_answered_count(session),
         current_question=_question_out(current) if current else None,
         answered=[_answered_out(q) for q in _answered(session)],
+        overall_score=report.overall_score if report else None,
+        category_scores=report.category_scores if report else [],
+        strengths=report.strengths if report else [],
+        weaknesses=report.weaknesses if report else [],
+        recommended_topics=report.recommended_topics if report else [],
+        summary=report.summary if report else "",
+        report_generated_by=report.generated_by if report else "fallback",
+        report_notice=report.notice if report else None,
         started_at=session.started_at,
         ended_at=session.ended_at,
         created_at=session.created_at,
@@ -147,11 +185,17 @@ def _list_out(session: models.VideoInterview) -> schemas.VideoInterviewListOut:
     return schemas.VideoInterviewListOut(
         id=session.id,
         application_id=session.application_id,
+        interview_type=getattr(session, "interview_type", None) or "technical",
         job_title=job_title,
         company_name=company_name,
         status=session.status,
         camera_enabled=bool(session.camera_enabled),
         microphone_enabled=bool(session.microphone_enabled),
+        overall_score=(
+            getattr(session, "overall_score", None)
+            if getattr(session, "report", None)
+            else None
+        ),
         started_at=session.started_at,
         ended_at=session.ended_at,
         created_at=session.created_at,
@@ -183,10 +227,11 @@ def start_video_interview(
 ):
     """Open a live video interview room for one of the candidate's applications.
 
-    The session state (status, camera/mic enablement, start timestamp) is
-    persisted so an interrupted session can be resumed later. The first
-    technical question is generated with the shared AI mock-interview engine
-    and persisted against the session.
+    ``interview_type`` selects the flavour (technical by default, or ``hr`` for
+    the HR mock interview). The session state (status, camera/mic enablement,
+    start timestamp) is persisted so an interrupted session can be resumed
+    later. The first question of the chosen type is generated with the shared
+    AI mock-interview engine and persisted against the session.
     """
     application = _owned_application(db, current_user, payload.application_id)
 
@@ -195,6 +240,7 @@ def start_video_interview(
         .filter(
             models.VideoInterview.application_id == application.id,
             models.VideoInterview.user_id == current_user.id,
+            models.VideoInterview.interview_type == payload.interview_type,
             models.VideoInterview.status
             == models.AssessmentStatusEnum.in_progress,
         )
@@ -204,8 +250,9 @@ def start_video_interview(
         raise HTTPException(
             status_code=409,
             detail=(
-                "A video interview is already in progress for this application "
-                f"(session {existing.id}). Resume it instead of starting a new one."
+                f"A {payload.interview_type} video interview is already in "
+                f"progress for this application (session {existing.id}). Resume "
+                "it instead of starting a new one."
             ),
         )
 
@@ -216,14 +263,17 @@ def start_video_interview(
         user_id=current_user.id,
         application_id=application.id,
         status=models.AssessmentStatusEnum.in_progress,
+        interview_type=payload.interview_type,
         camera_enabled=payload.camera_enabled,
         microphone_enabled=payload.microphone_enabled,
     )
     db.add(session)
     db.flush()
 
-    first_category = category_for_index(0)
-    question_result = generate_question(ctx, first_category, 0, total)
+    first_category = category_for_index(0, payload.interview_type)
+    question_result = generate_question(
+        ctx, first_category, 0, total, interview_type=payload.interview_type
+    )
     question = build_question_row(
         None,
         0,
@@ -279,9 +329,9 @@ def answer_video_interview_question(
     current_user: models.User = Depends(candidate_only),
     db: Session = Depends(get_db),
 ):
-    """Answer the current technical question. Evaluates the answer with the
-    shared AI mock-interview engine, persists it, then generates the next
-    (adaptive) question for the session."""
+    """Answer the current question of the session (technical or HR flavour).
+    Evaluates the answer with the shared AI mock-interview engine, persists it,
+    then generates the next (adaptive) question for the session."""
     session = _owned_session(db, current_user, session_id)
     _ensure_live(session)
 
@@ -296,7 +346,11 @@ def answer_video_interview_question(
     ctx = resolve_interview_context(db, current_user, application)
 
     evaluation = evaluate_answer(
-        ctx, question.question_text, question.category, payload.answer_text
+        ctx,
+        question.question_text,
+        question.category,
+        payload.answer_text,
+        interview_type=session.interview_type or "technical",
     )
     apply_evaluation(question, payload.answer_text, evaluation)
 
@@ -304,13 +358,14 @@ def answer_video_interview_question(
     next_question = None
     if _answered_count(session) < total:
         next_index = question.question_index + 1
-        category = category_for_index(next_index)
+        category = category_for_index(next_index, session.interview_type or "technical")
         question_result = generate_question(
             ctx,
             category,
             next_index,
             total,
             previous_answer=payload.answer_text,
+            interview_type=session.interview_type or "technical",
         )
         row = build_question_row(
             None,
@@ -345,9 +400,28 @@ def end_video_interview(
     db: Session = Depends(get_db),
 ):
     """End the session and close the room. Safe to call more than once: an
-    already-completed session keeps its original end timestamp."""
+    already-completed session keeps its original end timestamp.
+
+    The first time the session is ended, the shared AI report engine produces a
+    final report from the answered questions and stores it on the session."""
     session = _owned_session(db, current_user, session_id)
+
+    if session.status == models.AssessmentStatusEnum.completed:
+        db.commit()
+        db.refresh(session)
+        return _detail(session)
+
     end_session(session)
+
+    application = _owned_application(db, current_user, session.application_id)
+    ctx = resolve_interview_context(db, current_user, application)
+    report = generate_report(
+        ctx,
+        build_qa_pairs(_answered(session)),
+        interview_type=session.interview_type or "technical",
+    )
+    apply_report(session, report)
+
     db.commit()
     db.refresh(session)
     return _detail(session)
