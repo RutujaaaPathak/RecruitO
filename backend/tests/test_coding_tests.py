@@ -550,6 +550,86 @@ def test_execute_python_io_preserved():
     assert result.test_results[0].status == "passed"
 
 
+def test_execute_python_stdin_preserves_exact_bytes():
+    import hashlib
+
+    payloads = [
+        "3\n1 2 3\n5\n",
+        "alpha\r\nbeta\n",
+        "",
+    ]
+    cases = [
+        {
+            "input": data,
+            "expected": hashlib.sha256(data.encode("utf-8")).hexdigest(),
+        }
+        for data in payloads
+    ]
+    code = (
+        "import sys, hashlib\n"
+        "sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())"
+    )
+    result = execute_code("python", code, cases)
+    assert [r.status for r in result.test_results] == ["passed"] * len(payloads)
+
+
+def test_no_recruito_containers_left_after_execution():
+    import subprocess
+
+    execute_code(
+        "python",
+        TWO_SUM,
+        [{"input": "3\n1 2 3\n5", "expected": "1 2"}],
+    )
+    execute_code(
+        "python",
+        "while True:\n    pass",
+        [{"input": "", "expected": ""}],
+        time_limit=0.5,
+    )
+    probe = subprocess.run(
+        ["docker", "ps", "-aq", "--filter", "name=recruito-"],
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == 0
+    assert probe.stdout.strip() == ""
+
+
+def test_docker_create_failure_attempts_container_removal(monkeypatch):
+    import app.services.code_executor as ce
+
+    calls = []
+    real_run_cli = ce._run_cli
+
+    def fake_run_cli(args, timeout=ce._CLI_TIMEOUT):
+        calls.append(list(args))
+        if args[:2] == ["docker", "version"]:
+            return 0, "24.0", ""
+        if args[:2] == ["docker", "image", "inspect"]:
+            return 0, "", ""
+        if args[:2] == ["docker", "create"]:
+            return -1, "", "simulated docker create timeout"
+        return real_run_cli(args, timeout)
+
+    monkeypatch.setattr(ce, "_run_cli", fake_run_cli)
+    try:
+        result = ce.execute_code(
+            "python", "print('hi')", [{"input": "", "expected": "hi"}]
+        )
+    finally:
+        ce._env_checked = False
+        ce._env_ready = False
+        ce._env_error = ""
+
+    assert result.test_results[0].status == "runtime_error"
+    create_call = next(c for c in calls if c[:2] == ["docker", "create"])
+    name = create_call[3]
+    rm_calls = [c for c in calls if c[:3] == ["docker", "rm", "-f"]]
+    assert rm_calls, "docker rm -f was not attempted after a create failure"
+    assert any(c[3] == name for c in rm_calls)
+
+
 _MISSING_TOOLS = __import__("shutil").which("javac") is None, __import__("shutil").which("g++") is None
 
 
