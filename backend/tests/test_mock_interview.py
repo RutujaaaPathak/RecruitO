@@ -31,6 +31,10 @@ from app.services.mock_interview import (  # noqa: E402
     DEFAULT_MAX_QUESTIONS,
     EVALUATION_SYSTEM_PROMPT,
     FALLBACK_NOTICE,
+    HR_CATEGORIES,
+    HR_EVALUATION_SYSTEM_PROMPT,
+    HR_QUESTION_SYSTEM_PROMPT,
+    HR_REPORT_SYSTEM_PROMPT,
     QUESTION_SYSTEM_PROMPT,
     REPORT_SYSTEM_PROMPT,
     apply_evaluation,
@@ -48,6 +52,7 @@ from app.services.mock_interview import (  # noqa: E402
     fallback_report,
     generate_question,
     generate_report,
+    interview_categories,
     max_questions,
     parse_evaluation_json,
     parse_question_json,
@@ -629,3 +634,157 @@ def test_owned_interview_owner_allowed():
     interview = _owned_interview(FakeSession([_interview(user_id=1)]),
                                  _user(RoleEnum.user, id_=1), 10)
     assert interview.id == 10
+
+
+# ---------------------------------------------------------------------------
+# HR mode: categories, prompts, fallbacks, personas
+# ---------------------------------------------------------------------------
+
+def test_hr_category_rotation_repeats_cycle():
+    assert HR_CATEGORIES == [
+        "communication", "work_experience", "motivation", "behavioral"
+    ]
+    order = [category_for_index(i, "hr") for i in range(8)]
+    assert order == [
+        "communication", "work_experience", "motivation", "behavioral"
+    ] * 2
+    assert interview_categories("hr") == HR_CATEGORIES
+    assert interview_categories("technical") == CATEGORIES
+
+
+def test_build_question_prompt_advertises_hr_vocabulary():
+    prompt_hr = build_question_prompt(
+        _ctx(), "communication", 0, 8, interview_type="hr"
+    )
+    assert "communication, work_experience, motivation, behavioral" in prompt_hr
+    prompt_tech = build_question_prompt(_ctx(), "technical", 0, 8)
+    assert "technical, project_experience, problem_solving, behavioral" in prompt_tech
+    assert "communication" not in prompt_tech
+
+
+def test_generate_question_hr_uses_hr_persona_prompt():
+    captured = {}
+
+    def llm(prompt, system=None):
+        captured["system"] = system
+        return {
+            "question": "Describe a time you explained engineering work to a non-engineer."
+        }
+
+    result = generate_question(
+        _ctx(), "communication", 0, 8, llm_call=llm, interview_type="hr"
+    )
+    assert captured["system"] == HR_QUESTION_SYSTEM_PROMPT
+    assert result["generated_by"] == "llm"
+
+
+def test_generate_question_default_uses_technical_persona():
+    captured = {}
+
+    def llm(prompt, system=None):
+        captured["system"] = system
+        return {"question": "Explain your Django experience."}
+
+    generate_question(_ctx(), "technical", 0, 8, llm_call=llm)
+    assert captured["system"] == QUESTION_SYSTEM_PROMPT
+
+
+def test_generate_question_hr_falls_back_grounded_on_llm_failure():
+    def llm(prompt, system=None):
+        raise RuntimeError("down")
+
+    result = generate_question(
+        _ctx(), "communication", 0, 8, llm_call=llm, interview_type="hr"
+    )
+    assert result["generated_by"] == "fallback"
+    assert "non-technical audience" in result["question_text"]
+    assert result["notice"]
+
+
+def test_hr_fallback_questions_stay_grounded_in_category():
+    hr = _ctx()
+    checks = {
+        "communication": "non-technical",
+        "work_experience": "work history",
+        "motivation": "role",
+        "behavioral": "difficult situation",
+    }
+    for category, needle in checks.items():
+        q = fallback_question(hr, category, 0, 8, interview_type="hr")
+        assert needle.lower() in q["question_text"].lower()
+
+
+def test_fallback_question_default_stays_technical():
+    q = fallback_question(_ctx(), "technical", 0, 8)
+    assert "resume" in q["question_text"]
+
+
+def test_evaluate_answer_hr_uses_hr_persona_prompt():
+    captured = {}
+
+    def llm(prompt, system=None):
+        captured["system"] = system
+        return {
+            "score": 8,
+            "correctness": "good",
+            "strengths": ["clear"],
+            "weaknesses": [],
+            "missing_points": [],
+            "feedback": "keep going",
+        }
+
+    result = evaluate_answer(
+        _ctx(),
+        "Tell me about X.",
+        "communication",
+        "I led a demo for stakeholders.",
+        llm_call=llm,
+        interview_type="hr",
+    )
+    assert captured["system"] == HR_EVALUATION_SYSTEM_PROMPT
+    assert result["score"] == 8
+    assert result["generated_by"] == "llm"
+
+
+def test_generate_report_hr_uses_hr_persona_prompt():
+    captured = {}
+
+    def llm(prompt, system=None):
+        captured["system"] = system
+        return {
+            "overall_score": 8,
+            "category_scores": [
+                {"category": "communication", "score": 8, "comment": "good"}
+            ],
+            "strengths": ["clear"],
+            "weaknesses": [],
+            "recommended_topics": ["public speaking"],
+            "summary": "Strong communicator.",
+        }
+
+    report = generate_report(
+        _ctx(), [_qapair(8, "communication")], llm_call=llm, interview_type="hr"
+    )
+    assert captured["system"] == HR_REPORT_SYSTEM_PROMPT
+    assert report["overall_score"] == 8
+    assert report["generated_by"] == "llm"
+
+
+def test_generate_report_default_uses_technical_persona():
+    captured = {}
+
+    def llm(prompt, system=None):
+        captured["system"] = system
+        return {
+            "overall_score": 7,
+            "category_scores": [
+                {"category": "technical", "score": 7, "comment": "good"}
+            ],
+            "strengths": [],
+            "weaknesses": [],
+            "recommended_topics": [],
+            "summary": "Solid.",
+        }
+
+    generate_report(_ctx(), [_qapair(7)], llm_call=llm)
+    assert captured["system"] == REPORT_SYSTEM_PROMPT

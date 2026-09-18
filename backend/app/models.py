@@ -450,14 +450,16 @@ class MockInterview(Base):
 class MockInterviewQuestion(Base):
     """One grounded interview question and, after answering, its evaluation.
 
-    Shared by the text-based AI mock interview and the technical video
-    interview. ``interview_id`` anchors it to a mock interview,
+    Shared by the text-based AI mock interview and the AI video interview
+    (technical and HR modes). ``interview_id`` anchors it to a mock interview,
     ``video_interview_id`` anchors it to a video session (exactly one of the
     two is set).
 
     `category` is one of: technical, project_experience, problem_solving,
-    behavioral (rotated by the service). The unanswered question in a session
-    is the "current" question; resuming a session picks it up again.
+    behavioral (rotated by the service for technical mode) or communication,
+    work_experience, motivation, behavioral (HR mode). The unanswered question
+    in a session is the "current" question; resuming a session picks it up
+    again.
     """
 
     __tablename__ = "mock_interview_questions"
@@ -917,13 +919,21 @@ class AptitudeAnswer(Base):
 # Technical Video Interview: a candidate's live interview session
 # -----------------------------
 class VideoInterview(Base):
-    """A technical video interview session anchored to one of the candidate's
+    """A live AI video interview session anchored to one of the candidate's
     applications.
 
-    The room persists camera + microphone enablement and the session
-    start/end timestamps so an interrupted session can be resumed. The live
-    questions, candidate answers and AI evaluations are stored on the shared
+    ``interview_type`` discriminates the interview flavour: ``"technical"``
+    (technical, project, problem-solving, behavioral questions) or ``"hr"``
+    (communication, work-history, motivation, behavioral questions). The room
+    persists camera + microphone enablement and the session start/end
+    timestamps so an interrupted session can be resumed. The live questions,
+    candidate answers and AI evaluations are stored on the shared
     ``mock_interview_questions`` table via ``video_interview_id``.
+
+    ``interview_type`` is plain text (not an enum) so the shared question +
+    engine config stays free-form; the report columns below mirror the
+    text-based MockInterview report so both interview flavours can produce a
+    final report at completion.
 
     Reuses AssessmentStatusEnum (in_progress | completed) so the shared
     PostgreSQL enum type stays a single source of truth across assessments.
@@ -941,8 +951,21 @@ class VideoInterview(Base):
         default=AssessmentStatusEnum.in_progress,
         nullable=False,
     )
+    interview_type = Column(String(20), default="technical", nullable=False)
     camera_enabled = Column(Boolean, default=True, nullable=False)
     microphone_enabled = Column(Boolean, default=True, nullable=False)
+
+    # Final report (populated when the session is completed).
+    overall_score = Column(Integer, nullable=True)  # 0-10
+    category_scores = Column(JSON, nullable=True)
+    strengths = Column(JSON, nullable=True)
+    weaknesses = Column(JSON, nullable=True)
+    recommended_topics = Column(JSON, nullable=True)
+    summary = Column(Text, nullable=True)
+    report = Column(JSON, nullable=True)  # raw validated report (audit)
+    report_generated_by = Column(String, nullable=True)  # "llm" | "fallback"
+    report_notice = Column(Text, nullable=True)
+
     started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     ended_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

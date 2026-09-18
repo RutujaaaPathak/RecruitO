@@ -11,11 +11,13 @@ in the candidate's actual data:
   - the selected application and its job (title, skills, description)
   - ATS / semantic scores and the skill-gap snapshot where available
 
-The interview rotates question categories (technical -> project_experience ->
-problem_solving -> behavioral), adapts follow-ups to the candidate's previous
-answer, and evaluates every answer 0-10. On any LLM failure each stage (question
-generation, evaluation, final report) degrades to a deterministic, fully
-grounded rule-based fallback so the interview always works.
+The interview rotates question categories by type (technical mode: technical ->
+project_experience -> problem_solving -> behavioral; HR mode: communication ->
+work_experience -> motivation -> behavioral), adapts follow-ups to the
+candidate's previous answer, and evaluates every answer 0-10. On any LLM
+failure each stage (question generation, evaluation, final report) degrades to
+a deterministic, fully grounded rule-based fallback so the interview always
+works.
 
 This module deliberately does NOT import the (paused) RAG chatbot service. It
 assembles its own small context block from the shared low-level helpers so the
@@ -41,7 +43,12 @@ from app.services.resume_retriever import (
 from app.services.skill_gap import analyze_skill_gap
 
 # Categories, rotated in this exact order for every interview.
+# Technical mode: technical + career/job-focused behavioural questions.
 CATEGORIES = ["technical", "project_experience", "problem_solving", "behavioral"]
+
+# HR mode: behavioural soft-skills / fit questions drawn from the candidate's
+# real work history and profile (never invented by the model).
+HR_CATEGORIES = ["communication", "work_experience", "motivation", "behavioral"]
 
 DEFAULT_MAX_QUESTIONS = 8
 
@@ -117,6 +124,68 @@ GROUNDING RULES — follow them without exception:
 2. overall_score should reflect the supplied aggregate scores.
 3. recommended_topics are topics to prepare next; ground them in the supplied
    missing skills and the weakest categories.
+4. Keep lists concise (2-5 items)."""
+
+HR_QUESTION_SYSTEM_PROMPT = """You are an HR interviewer inside RecruitO, an ATS/recruitment
+platform. Your ONLY job is to generate ONE realistic HR/soft-skills interview
+question for a candidate applying to a specific role. Respond with ONLY valid
+JSON in this exact shape: {"question": string}
+
+STRICT GROUNDING RULES — follow them without exception:
+1. Generate a question that is answerable from the candidate's ACTUAL background
+   in the SUPPLIED CONTEXT (their resume, profile and the selected job). Ask only
+   about experiences, projects, roles and motivations that appear in the context.
+2. NEVER ask about a skill, role, achievement or motivation that is not present
+   in the supplied context, and never assert invented facts about the candidate.
+3. Phrase questions so the candidate can describe their own, real experience
+   (e.g. "Describe a time you communicated a technical topic to a non-technical
+   audience" rather than "you have strong presentation skills").
+4. The question must match the requested CATEGORY. If the category cannot be
+   grounded in a specific context detail, still ask a general question in that
+   category that asks the candidate to describe their own experience — without
+   inventing anything.
+5. Keep the question 1-3 sentences, specific, and answerable in a text
+   interview. Do not include evaluation criteria or hints."""
+
+HR_EVALUATION_SYSTEM_PROMPT = """You are an HR interviewer and evaluator inside RecruitO.
+Evaluate ONE candidate answer to ONE HR/soft-skills interview question. Respond
+with ONLY valid JSON in this exact shape:
+{
+  "score": int (0-10),
+  "correctness": string,
+  "strengths": [string],
+  "weaknesses": [string],
+  "missing_points": [string],
+  "feedback": string
+}
+
+GROUNDING RULES — follow them without exception:
+1. Evaluate ONLY the supplied question and the candidate's answer. Do not
+   evaluate against experience that is not in the answer.
+2. score is 0-10 based on relevance, communication quality and completeness
+   relative to the supplied context. Be fair; an empty or off-topic answer
+   scores low.
+3. strengths, weaknesses and missing_points: 0-4 concise items each.
+4. feedback: 1-2 sentences of concise, actionable improvement advice."""
+
+HR_REPORT_SYSTEM_PROMPT = """You are an HR interviewer inside RecruitO. Produce a final
+candidate-fit report from the candidate's answered HR interview questions.
+Respond with ONLY valid JSON in this exact shape:
+{
+  "overall_score": int (0-10),
+  "category_scores": [{"category": string, "score": int (0-10), "comment": string}],
+  "strengths": [string],
+  "weaknesses": [string],
+  "recommended_topics": [string],
+  "summary": string
+}
+
+GROUNDING RULES — follow them without exception:
+1. Base every score, strength, weakness and recommendation ONLY on the supplied
+   per-question evaluations and the supplied context. Never invent candidate
+   experience or motivations.
+2. overall_score should reflect the supplied aggregate scores.
+3. recommended_topics are areas for the candidate to prepare next.
 4. Keep lists concise (2-5 items)."""
 
 
@@ -304,9 +373,15 @@ def max_questions() -> int:
     return max(1, min(30, value))
 
 
-def category_for_index(index: int) -> str:
-    """Rotating category for a zero-based question index."""
-    return CATEGORIES[index % len(CATEGORIES)]
+def interview_categories(interview_type: str) -> List[str]:
+    """The rotating category list for an interview flavour."""
+    return HR_CATEGORIES if interview_type == "hr" else CATEGORIES
+
+
+def category_for_index(index: int, interview_type: str = "technical") -> str:
+    """Rotating category for a zero-based question index of an interview type."""
+    cats = interview_categories(interview_type)
+    return cats[index % len(cats)]
 
 
 # ---------------------------------------------------------------------------
@@ -360,8 +435,13 @@ def build_question_prompt(
     question_index: int,
     total: int,
     previous_answer: Optional[str] = None,
+    interview_type: str = "technical",
 ) -> str:
-    """Compose the prompt that produces ONE grounded interview question."""
+    """Compose the prompt that produces ONE grounded interview question.
+
+    ``interview_type`` selects the category vocabulary advertised to the model
+    (technical categories vs HR categories).
+    """
     previous_block = ""
     if previous_answer and previous_answer.strip():
         previous_block = (
@@ -369,11 +449,12 @@ def build_question_prompt(
             f"question an adaptive follow-up that builds on it WITHOUT assuming\n"
             f"anything not in the context):\n{previous_answer.strip()}\n"
         )
+    categories_hint = ", ".join(interview_categories(interview_type))
     return f"""SUPPLIED CONTEXT (the ONLY facts you may use):
 
 {build_context_section(ctx)}
 
-CATEGORY: {category} (one of: technical, project_experience, problem_solving, behavioral)
+CATEGORY: {category} (one of: {categories_hint})
 
 QUESTION NUMBER: {question_index + 1} of {total}
 
@@ -398,13 +479,25 @@ def fallback_question(
     category: str,
     question_index: int,
     total: int,
+    interview_type: str = "technical",
 ) -> Dict[str, Any]:
     """Deterministic, fully grounded question for when the LLM is unavailable.
 
     Technical questions anchor on a skill that is required by the job (or
-    already in the resume). All other categories only ask the candidate to
-    describe their own, real experience — nothing is invented.
+    already in the resume). HR questions ask the candidate to describe their
+    own, real work history, communication and motivations — nothing is
+    invented. All other categories only ask the candidate to describe their own
+    experience.
     """
+    notice = {
+        "question_text": None,
+        "generated_by": "fallback",
+        "notice": FALLBACK_NOTICE,
+    }
+
+    if interview_type == "hr":
+        return _fallback_hr_question(ctx, category, question_index, total, notice)
+
     candidates = ctx.job_skills or ctx.matched_skills or ctx.missing_skills
     skill = candidates[question_index % len(candidates)] if candidates else None
 
@@ -440,11 +533,46 @@ def fallback_question(
             "did you learn from it?"
         )
 
-    return {
-        "question_text": question,
-        "generated_by": "fallback",
-        "notice": FALLBACK_NOTICE,
-    }
+    notice["question_text"] = question
+    return notice
+
+
+def _fallback_hr_question(
+    ctx: InterviewContext,
+    category: str,
+    question_index: int,
+    total: int,
+    notice: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Deterministic HR-mode question, grounded only in the real context."""
+    educational = (
+        f"Work your way through your real work history from the resume and "
+        f"the job ({ctx.job_title or 'this role'} at "
+        f"{ctx.job_company or 'this company'}): what roles have you held, "
+        f"what did you own in each, and how does it connect to this job?"
+    )
+    if category == "communication":
+        question = (
+            "Describe a real situation where you explained something complex to a "
+            "non-technical audience or stakeholder. What did you do to make it "
+            "clear, and what was the outcome?"
+        )
+    elif category == "work_experience":
+        question = educational
+    elif category == "motivation":
+        question = (
+            "Why are you genuinely interested in this role and company based on "
+            "your own career goals, and what are you hoping to achieve in the next "
+            "role you take?"
+        )
+    else:  # behavioral / teamwork / conflict / fit
+        question = (
+            "Tell me about a real time you faced a disagreement or a difficult "
+            "situation with teammates or a manager. How did you handle it, and "
+            "what would you do differently?"
+        )
+    notice["question_text"] = question
+    return notice
 
 
 def generate_question(
@@ -454,11 +582,19 @@ def generate_question(
     total: int,
     previous_answer: Optional[str] = None,
     llm_call=None,
+    interview_type: str = "technical",
 ) -> Dict[str, Any]:
-    """Generate one grounded question; falls back to a deterministic one."""
+    """Generate one grounded question; falls back to a deterministic one.
+
+    ``interview_type`` picks the role-specific system prompt and fallback bank
+    (technical vs HR); the technical pipeline is the default and unchanged.
+    """
     if llm_call is None:
         llm_call = llm_client.generate_json
 
+    system_prompt = (
+        HR_QUESTION_SYSTEM_PROMPT if interview_type == "hr" else QUESTION_SYSTEM_PROMPT
+    )
     try:
         prompt = build_question_prompt(
             ctx,
@@ -466,14 +602,17 @@ def generate_question(
             question_index,
             total,
             previous_answer=previous_answer,
+            interview_type=interview_type,
         )
-        raw = llm_call(prompt, system=QUESTION_SYSTEM_PROMPT)
+        raw = llm_call(prompt, system=system_prompt)
         question = parse_question_json(raw)
         question["generated_by"] = "llm"
         question["notice"] = None
         return question
     except Exception as exc:
-        question = fallback_question(ctx, category, question_index, total)
+        question = fallback_question(
+            ctx, category, question_index, total, interview_type=interview_type
+        )
         question["notice"] = f"{FALLBACK_NOTICE} ({_safe_reason(exc)})"
         return question
 
@@ -648,14 +787,22 @@ def evaluate_answer(
     category: str,
     answer_text: str,
     llm_call=None,
+    interview_type: str = "technical",
 ) -> Dict[str, Any]:
-    """Evaluate one answer; falls back to a deterministic evaluation."""
+    """Evaluate one answer; falls back to a deterministic evaluation.
+
+    ``interview_type`` picks the evaluator persona (technical vs HR); the
+    technical pipeline is the default and unchanged.
+    """
     if llm_call is None:
         llm_call = llm_client.generate_json
 
+    system_prompt = (
+        HR_EVALUATION_SYSTEM_PROMPT if interview_type == "hr" else EVALUATION_SYSTEM_PROMPT
+    )
     try:
         prompt = build_evaluation_prompt(ctx, question_text, category, answer_text)
-        raw = llm_call(prompt, system=EVALUATION_SYSTEM_PROMPT)
+        raw = llm_call(prompt, system=system_prompt)
         evaluation = parse_evaluation_json(raw)
         if not evaluation["feedback"] and not evaluation["correctness"]:
             raise ValueError("LLM returned an empty evaluation")
@@ -828,15 +975,25 @@ def generate_report(
     ctx: InterviewContext,
     qa_pairs: List[Dict[str, Any]],
     llm_call=None,
+    interview_type: str = "technical",
 ) -> Dict[str, Any]:
-    """Produce the final interview report; falls back to a deterministic one."""
+    """Produce the final interview report; falls back to a deterministic one.
+
+    ``interview_type`` picks the reporting persona (technical vs HR); the
+    technical pipeline is the default and unchanged.
+    """
     if llm_call is None:
         llm_call = llm_client.generate_json
 
+    system_prompt = (
+        HR_REPORT_SYSTEM_PROMPT
+        if interview_type == "hr"
+        else REPORT_SYSTEM_PROMPT
+    )
     aggregates = _aggregate_scores(qa_pairs)
     try:
         prompt = build_report_prompt(ctx, qa_pairs, aggregates)
-        raw = llm_call(prompt, system=REPORT_SYSTEM_PROMPT)
+        raw = llm_call(prompt, system=system_prompt)
         report = parse_report_json(raw)
         if not report["summary"] and not report["category_scores"]:
             raise ValueError("LLM returned an empty report")
@@ -864,8 +1021,8 @@ def build_question_row(
     """Construct an (unsaved) MockInterviewQuestion ORM object.
 
     Anchor the question to a text-based mock interview via ``interview_id``, or
-    to a technical video interview session via ``video_interview_id`` (exactly
-    one of the two is set).
+    to a video interview session (technical or HR) via ``video_interview_id``
+    (exactly one of the two is set).
     """
     return MockInterviewQuestion(
         interview_id=interview_id,
