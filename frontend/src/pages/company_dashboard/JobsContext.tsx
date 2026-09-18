@@ -6,7 +6,7 @@ import {
   ReactNode,
   useCallback,
 } from "react";
-import { jobsData, Job, ApiJob, toUIFrontJob, ApiJobInput } from "./data";
+import { Job, ApiJob, toUIFrontJob, ApiJobInput } from "./data";
 import { api } from "../../lib/api";
 
 interface JobsContextType {
@@ -23,7 +23,7 @@ interface JobsContextType {
 const JobsContext = createContext<JobsContextType | undefined>(undefined);
 
 export function JobsProvider({ children }: { children: ReactNode }) {
-  const [jobs, setJobs] = useState<Job[]>(jobsData);
+  const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
