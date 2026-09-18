@@ -1,6 +1,6 @@
 import os
 from jose import jwt, JWTError
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 # pyrefly: ignore [missing-import]
 from fastapi.security import OAuth2PasswordBearer
 # pyrefly: ignore [missing-import]
@@ -14,9 +14,43 @@ from app.config import load_env
 
 load_env()
 
-# SECRET_KEY is loaded from the environment. A demo fallback is provided so a
-# fresh checkout can run, but production MUST set a strong SECRET_KEY in .env.
-SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
+# SECRET_KEY is required for signing and verifying access tokens. It must be
+# provided in the environment or backend/.env and must be strong (at least
+# 32 characters and not a known placeholder). Startup fails loudly if it is
+# missing or weak so tokens are never signed with a predictable key.
+_WEAK_SECRET_PLACEHOLDERS = frozenset(
+    {
+        "supersecretkey",
+        "change-me-to-a-long-random-secret",
+        "change-me-strong-password",
+    }
+)
+MIN_SECRET_KEY_LENGTH = 32
+
+
+def _require_secret_key() -> str:
+    key = os.getenv("SECRET_KEY")
+    if not key:
+        raise RuntimeError(
+            "SECRET_KEY is not set. Set a strong random SECRET_KEY in "
+            "backend/.env or the process environment, e.g. generated with "
+            "`python -c \"import secrets; print(secrets.token_hex(32))\"`."
+        )
+    if key.strip().lower() in _WEAK_SECRET_PLACEHOLDERS:
+        raise RuntimeError(
+            "SECRET_KEY is set to a known placeholder. Generate a strong "
+            "random SECRET_KEY in backend/.env, e.g. `python -c \"import "
+            "secrets; print(secrets.token_hex(32))\"`."
+        )
+    if len(key) < MIN_SECRET_KEY_LENGTH:
+        raise RuntimeError(
+            f"SECRET_KEY is too weak ({len(key)} characters). Use at least "
+            f"{MIN_SECRET_KEY_LENGTH} characters."
+        )
+    return key
+
+
+SECRET_KEY = _require_secret_key()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
@@ -24,7 +58,9 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
 def create_access_token(data: dict):
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now(timezone.utc) + timedelta(
+        minutes=ACCESS_TOKEN_EXPIRE_MINUTES
+    )
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 

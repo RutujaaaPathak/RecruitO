@@ -40,7 +40,27 @@ def update_user(
         raise HTTPException(status_code=404, detail="User not found")
 
     data = payload.model_dump(exclude_unset=True)
-    # Prevent accidental self-demotion/suspension of the last admin if it is self.
+    new_role = data.get("role", user.role)
+    new_active = data.get("is_active", user.is_active)
+    removes_active_admin = (
+        user.role == models.RoleEnum.admin
+        and user.is_active is True
+        and not (new_role == models.RoleEnum.admin and new_active is True)
+    )
+    if removes_active_admin:
+        remaining_active_admins = (
+            db.query(models.User)
+            .filter(models.User.role == models.RoleEnum.admin)
+            .filter(models.User.is_active.is_(True))
+            .filter(models.User.id != user_id)
+            .count()
+        )
+        if remaining_active_admins == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot demote or deactivate the last active admin",
+            )
+
     for field, value in data.items():
         setattr(user, field, value)
     db.commit()

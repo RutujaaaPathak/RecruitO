@@ -6,7 +6,7 @@ import logging
 
 # Load environment variables before importing any module that reads them,
 # anchored to the project root so it works regardless of the working directory.
-from app.config import load_env
+from app.config import load_env, cors_origins
 
 load_env()
 
@@ -52,7 +52,7 @@ app = FastAPI()
 # Enable CORS (VERY IMPORTANT for frontend connection)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # React Vite default
+    allow_origins=cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
