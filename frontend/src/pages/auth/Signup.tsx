@@ -23,15 +23,60 @@ export default function Signup() {
   const [registrationNumber, setRegistrationNumber] = useState("");
   const [industry, setIndustry] = useState("");
 
+  const [otp, setOtp] = useState("");
+  const [otpSent, setOtpSent] = useState(false);
+
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const isCandidate = role === "user";
 
   const isFreeEmail = (email: string) => {
     return /@(gmail|yahoo|outlook|hotmail)\.com$/i.test(email);
   };
 
+  const handleEmailChange = (value: string) => {
+    setEmail(value);
+    if (otpSent) {
+      // A code is bound to the email it was sent to; require a fresh OTP.
+      setOtpSent(false);
+      setOtp("");
+      setSuccess("");
+    }
+  };
+
+  const switchRole = (next: Role) => {
+    setRole(next);
+    setOtp("");
+    setOtpSent(false);
+    setSuccess("");
+    setError("");
+  };
+
+  const sendVerificationCode = async () => {
+    setError("");
+    setSuccess("");
+    setLoading(true);
+    try {
+      await api.post("/send-otp", { email });
+      setOtpSent(true);
+      setSuccess(
+        `Verification code sent to ${email}. Check your inbox and enter the 6-digit code below.`
+      );
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "Failed to send verification code. Please try again."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setSuccess("");
 
     if (!email || !phone || !password || !confirmPassword) {
       setError("All required fields must be filled");
@@ -48,7 +93,7 @@ export default function Signup() {
       return;
     }
 
-    if (role === "user") {
+    if (isCandidate) {
       if (!fullName) {
         setError("Please complete all candidate fields");
         return;
@@ -67,14 +112,27 @@ export default function Signup() {
       }
     }
 
+    // Candidate signup requires OTP verification: send the code first, then
+    // block submission until a code has actually been provided.
+    if (isCandidate && !otpSent) {
+      await sendVerificationCode();
+      return;
+    }
+
+    if (isCandidate && (!otp || otp.trim().length !== 6)) {
+      setError("Enter the 6-digit verification code sent to your email.");
+      return;
+    }
+
+    setLoading(true);
     try {
       await api.post("/signup", {
-        name: role === "user" ? fullName : companyName,
+        name: isCandidate ? fullName : companyName,
         email,
         phone,
         password,
         role,
-        otp: "",
+        otp: isCandidate ? otp.trim() : "",
       });
 
       // Auto-login after successful signup
@@ -101,13 +159,17 @@ export default function Signup() {
         // Token issuance failure is non-fatal
       }
 
-      if (role === "user") {
+      setSuccess("Account created successfully. Redirecting...");
+
+      if (isCandidate) {
         navigate("/dashboard");
       } else {
         navigate("/company/dashboard");
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Server error. Please try again.");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -135,7 +197,7 @@ export default function Signup() {
 
             <button
               type="button"
-              onClick={() => setRole("user")}
+              onClick={() => switchRole("user")}
               className={`relative z-10 w-1/2 py-2 text-sm ${
                 role === "user" ? "text-white" : "text-white/70"
               }`}
@@ -145,7 +207,7 @@ export default function Signup() {
 
             <button
               type="button"
-              onClick={() => setRole("company")}
+              onClick={() => switchRole("company")}
               className={`relative z-10 w-1/2 py-2 text-sm ${
                 role === "company" ? "text-white" : "text-white/70"
               }`}
@@ -178,7 +240,7 @@ export default function Signup() {
                   type="email"
                   placeholder="Email"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  onChange={(e) => handleEmailChange(e.target.value)}
                   className="inputStyle"
                 />
               </motion.div>
@@ -197,7 +259,7 @@ export default function Signup() {
                   onChange={(e)=>setCompanyName(e.target.value)} className="inputStyle"/>
 
                 <input type="email" placeholder="Official Company Email"
-                  value={email} onChange={(e)=>setEmail(e.target.value)}
+                  value={email} onChange={(e)=>handleEmailChange(e.target.value)}
                   className="inputStyle"/>
 
                 <input placeholder="Company Website" value={website}
@@ -226,15 +288,51 @@ export default function Signup() {
             onChange={(e)=>setConfirmPassword(e.target.value)}
             className="inputStyle"/>
 
+          {isCandidate && otpSent && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              className="space-y-2"
+            >
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                placeholder="6-digit verification code"
+                value={otp}
+                onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
+                className="inputStyle tracking-[0.3em] text-center"
+              />
+              <button
+                type="button"
+                onClick={sendVerificationCode}
+                disabled={loading}
+                className="text-violet-400 text-sm hover:text-violet-300 disabled:opacity-50"
+              >
+                Resend code
+              </button>
+            </motion.div>
+          )}
+
           {error && (
             <p className="text-red-400 text-sm text-center">{error}</p>
+          )}
+          {success && (
+            <p className="text-emerald-400 text-sm text-center">{success}</p>
           )}
 
           <button
             type="submit"
-            className="w-full py-4 rounded-full bg-gradient-to-r from-violet-600 to-blue-600 text-white font-semibold hover:scale-105"
+            disabled={loading}
+            className="w-full py-4 rounded-full bg-gradient-to-r from-violet-600 to-blue-600 text-white font-semibold hover:scale-105 disabled:opacity-60 disabled:hover:scale-100"
           >
-            Sign Up
+            {loading
+              ? isCandidate && !otpSent
+                ? "Sending code..."
+                : "Creating account..."
+              : isCandidate && !otpSent
+              ? "Send Verification Code"
+              : "Sign Up"}
           </button>
 
         </form>
