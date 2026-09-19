@@ -323,6 +323,28 @@ class EmailOTP(Base):
 
 
 # -----------------------------
+# Password Reset Token Table
+# -----------------------------
+class PasswordResetToken(Base):
+    """One short-lived, single-use password-reset token per account.
+
+    Only a SHA-256 digest of the raw token is stored (never the token itself),
+    so the raw value cannot be recovered from the database. The digest allows
+    O(1) lookup on /reset-password; the raw 256-bit token is only sent to the
+    user's inbox and is infeasible to brute force. Tokens expire and are
+    deleted after a single successful use.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, index=True, nullable=False)
+    token_hash = Column(String, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+# -----------------------------
 # AI Chatbot: conversation sessions + messages
 # -----------------------------
 class ChatSession(Base):
