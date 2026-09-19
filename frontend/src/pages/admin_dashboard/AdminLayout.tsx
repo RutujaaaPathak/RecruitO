@@ -2,6 +2,7 @@ import { useNavigate, NavLink, Outlet } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useAuthStore } from "../../store/AuthStore";
+import NotificationsBell from "../../components/NotificationsBell";
 
 export default function AdminLayout() {
   const navigate = useNavigate();
@@ -69,9 +70,13 @@ export default function AdminLayout() {
             Admin Dashboard
           </h1>
 
-          <Avatar className="cursor-pointer hover:scale-105 transition">
-            <AvatarFallback>AD</AvatarFallback>
-          </Avatar>
+          <div className="flex items-center gap-3">
+            <NotificationsBell buttonClassName="hover:bg-white/5 text-gray-300" />
+
+            <Avatar className="cursor-pointer hover:scale-105 transition">
+              <AvatarFallback>AD</AvatarFallback>
+            </Avatar>
+          </div>
         </div>
 
         <div className="flex-1 px-10 py-10 bg-gradient-to-b from-[#111827] to-[#0f172a]">

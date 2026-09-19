@@ -8,6 +8,7 @@ All tests call the route functions directly with a lightweight fake DB, so no
 database or SMTP service is required.
 """
 import importlib
+import smtplib
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -243,3 +244,20 @@ def test_send_email_otp_missing_smtp_raises_actionable_error(monkeypatch):
     assert "EMAIL_ADDRESS" in exc.value.detail
     assert "EMAIL_PASSWORD" in exc.value.detail
     assert "BYPASS_EMAIL_OTP" in exc.value.detail
+
+
+def test_send_email_otp_runtime_smtp_failure_keeps_otp_wording(monkeypatch):
+    monkeypatch.setenv("EMAIL_ADDRESS", "mailer@recruito.com")
+    monkeypatch.setenv("EMAIL_PASSWORD", "mailer-app-password")
+
+    class _FailingSMTP:
+        def __init__(self, *args, **kwargs):
+            raise smtplib.SMTPException(451, "temporary failure")
+
+    monkeypatch.setattr(smtplib, "SMTP", _FailingSMTP)
+
+    with pytest.raises(HTTPException) as exc:
+        auth_mod.send_email_otp("cand@recruito.com", "123456")
+    assert exc.value.status_code == 500
+    # Exact historic wording is preserved for OTP sends.
+    assert exc.value.detail == "Failed to send OTP email: SMTP error."

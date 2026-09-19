@@ -26,6 +26,7 @@ from app.routes import (
     coding_tests,
     aptitude_tests,
     video_interviews,
+    notifications,
 )
 
 from sqlalchemy import text
@@ -72,6 +73,7 @@ app.include_router(coding_tests.router)
 app.include_router(aptitude_tests.router)
 app.include_router(video_interviews.router)
 app.include_router(admin.router)
+app.include_router(notifications.router)
 
 @app.get("/")
 def read_root():

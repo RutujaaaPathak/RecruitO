@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.deps import get_db
 from app.auth import get_current_user, RoleChecker
 from app import models, schemas
+from app.services.notifications import create_notification
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -92,6 +93,22 @@ def set_company_approval(
     if company is None:
         raise HTTPException(status_code=404, detail="Company not found")
     company.approved = approved
+
+    # Notify the company owner about the approval decision.
+    create_notification(
+        db,
+        company.user_id,
+        type=models.NotificationType.system,
+        title="Company Approved" if approved else "Company Application Rejected",
+        message=(
+            f"Your company {company.name} has been approved."
+            if approved
+            else f"Your company {company.name} was not approved. "
+            "Please review the requirements and try again."
+        ),
+        link="/company/dashboard",
+    )
+
     db.commit()
     db.refresh(company)
     return schemas.CompanyOut.model_validate(company)

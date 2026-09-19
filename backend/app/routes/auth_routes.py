@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 # pyrefly: ignore [missing-import]
 from pydantic import BaseModel, EmailStr
 import random
+import secrets
+import hashlib
 import smtplib
 import logging
 import os
@@ -14,7 +16,7 @@ from datetime import datetime, timedelta
 from app.deps import get_db
 from app import models, schemas
 from app.utils import hash_password, verify_password
-from app.models import RoleEnum, EmailOTP
+from app.models import RoleEnum, EmailOTP, PasswordResetToken
 from app.auth import create_access_token, get_current_user, RoleChecker
 from app.config import load_env
 from app.rate_limit import client_ip, check_rate_limit, reset_rate_limit
@@ -51,6 +53,13 @@ LOGIN_WINDOW_SECONDS = int(os.getenv("LOGIN_WINDOW_SECONDS", "300"))
 OTP_MAX_REQUESTS = int(os.getenv("OTP_MAX_REQUESTS", "3"))
 OTP_WINDOW_SECONDS = int(os.getenv("OTP_WINDOW_SECONDS", "60"))
 
+# Password reset config. Tokens are short-lived (default 30 min), single-use,
+# and only ever stored hashed. forgot-password requests are throttled per
+# IP + email; reset-password attempts reuse the login brute-force limits per IP.
+RESET_TOKEN_EXPIRE_MINUTES = int(os.getenv("RESET_TOKEN_EXPIRE_MINUTES", "30"))
+RESET_MAX_REQUESTS = int(os.getenv("RESET_MAX_REQUESTS", "3"))
+RESET_WINDOW_SECONDS = int(os.getenv("RESET_WINDOW_SECONDS", "300"))
+
 router = APIRouter()
 
 # Roles a user is allowed to self-register as.
@@ -81,31 +90,48 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    # Only the new password is required; the reset token is self-contained
+    # (it carries whatever email it was issued for).
+    token: str
+    new_password: str
+
+
 # ----------------------------
-# Email Sending Function
+# Email Sending Functions
 # ----------------------------
 
-def send_email_otp(receiver_email: str, otp: str):
+def send_email(
+    receiver_email: str,
+    subject: str,
+    body: str,
+    missing_config_detail: str | None = None,
+    failure_prefix: str = "Failed to send email: ",
+):
+    """Shared SMTP sender. Raises an actionable 500 when email is unconfigured.
+
+    The detail and failure wording are kept configurable because callers
+    surface their own remediation/message text (e.g. OTP vs password reset).
+    SMTP failures never leak the message contents.
+    """
+    if missing_config_detail is None:
+        missing_config_detail = (
+            "Email service is not configured. Set EMAIL_ADDRESS and "
+            "EMAIL_PASSWORD in .env (use a Gmail App Password)."
+        )
+
     sender_email = os.getenv("EMAIL_ADDRESS")
     sender_password = os.getenv("EMAIL_PASSWORD")
 
     if not sender_email or not sender_password:
         logger.error(
-            "OTP email failed: EMAIL_ADDRESS or EMAIL_PASSWORD is not set in .env "
-            "(candidate signup OTP is required by default)."
+            "Email send failed: EMAIL_ADDRESS or EMAIL_PASSWORD is not set in .env."
         )
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Email service is not configured and candidate signup OTP is "
-                "required. Set EMAIL_ADDRESS and EMAIL_PASSWORD in .env (use a "
-                "Gmail App Password), or for local development/testing only set "
-                "BYPASS_EMAIL_OTP=true in .env to skip OTP."
-            ),
-        )
-
-    subject = "RecruitO OTP Verification"
-    body = f"Your OTP for RecruitO signup is: {otp}"
+        raise HTTPException(status_code=500, detail=missing_config_detail)
 
     msg = MIMEText(body)
     msg["Subject"] = subject
@@ -121,7 +147,7 @@ def send_email_otp(receiver_email: str, otp: str):
         server.ehlo()
         server.login(sender_email, sender_password)
         server.sendmail(sender_email, receiver_email, msg.as_string())
-        logger.info("OTP email sent to %s", receiver_email)
+        logger.info("Email sent to %s", receiver_email)
     except smtplib.SMTPAuthenticationError as exc:
         logger.error(
             "SMTP authentication failed for %s — "
@@ -133,25 +159,25 @@ def send_email_otp(receiver_email: str, otp: str):
         )
         raise HTTPException(
             status_code=500,
-            detail="Failed to send OTP email: SMTP authentication failed. Check EMAIL_PASSWORD (use a Gmail App Password, not your account password).",
+            detail=f"{failure_prefix}SMTP authentication failed. Check EMAIL_PASSWORD (use a Gmail App Password, not your account password).",
         )
     except smtplib.SMTPConnectError as exc:
         logger.error("SMTP connection to %s:%s failed: %s", SMTP_HOST, SMTP_PORT, exc)
         raise HTTPException(
             status_code=500,
-            detail="Failed to send OTP email: could not connect to SMTP server.",
+            detail=f"{failure_prefix}could not connect to SMTP server.",
         )
     except smtplib.SMTPException as exc:
-        logger.error("SMTP error while sending OTP: %s", exc)
+        logger.error("SMTP error while sending email: %s", exc)
         raise HTTPException(
             status_code=500,
-            detail="Failed to send OTP email: SMTP error.",
+            detail=f"{failure_prefix}SMTP error.",
         )
     except OSError as exc:
-        logger.error("Network error while sending OTP (check internet/firewall): %s", exc)
+        logger.error("Network error while sending email (check internet/firewall): %s", exc)
         raise HTTPException(
             status_code=500,
-            detail="Failed to send OTP email: network error.",
+            detail=f"{failure_prefix}network error.",
         )
     finally:
         if server is not None:
@@ -159,6 +185,47 @@ def send_email_otp(receiver_email: str, otp: str):
                 server.quit()
             except smtplib.SMTPException:
                 pass
+
+
+def send_email_otp(receiver_email: str, otp: str):
+    subject = "RecruitO OTP Verification"
+    body = f"Your OTP for RecruitO signup is: {otp}"
+    send_email(
+        receiver_email,
+        subject,
+        body,
+        missing_config_detail=(
+            "Email service is not configured and candidate signup OTP is "
+            "required. Set EMAIL_ADDRESS and EMAIL_PASSWORD in .env (use a "
+            "Gmail App Password), or for local development/testing only set "
+            "BYPASS_EMAIL_OTP=true in .env to skip OTP."
+        ),
+        failure_prefix="Failed to send OTP email: ",
+    )
+
+
+def send_password_reset_email(receiver_email: str, token: str):
+    subject = "RecruitO Password Reset"
+    body = (
+        "Hello,\n\n"
+        "You (or someone else) requested a password reset for your RecruitO "
+        "account.\n\n"
+        f"Your password reset token is:\n\n{token}\n\n"
+        f"It is valid for {RESET_TOKEN_EXPIRE_MINUTES} minutes and can be used "
+        "only once. Do not share it with anyone.\n\n"
+        "If you did not request this, you can safely ignore this email; your "
+        "password will not be changed.\n"
+    )
+    send_email(
+        receiver_email,
+        subject,
+        body,
+        missing_config_detail=(
+            "Email service is not configured. Set EMAIL_ADDRESS and "
+            "EMAIL_PASSWORD in .env (use a Gmail App Password) to enable "
+            "password reset emails."
+        ),
+    )
 
 
 # ----------------------------
@@ -376,6 +443,151 @@ def login(
         "role": user.role.value,
         "name": user.name
     }
+
+
+# ----------------------------
+# Forgot Password Route (issues a short-lived reset token)
+# ----------------------------
+
+@router.post("/forgot-password")
+def forgot_password(
+    request: ForgotPasswordRequest,
+    raw_request: Request,
+    db: Session = Depends(get_db),
+):
+
+    # Rate-limit reset-token requests per IP + email to prevent spam and
+    # email enumeration probing.
+    if RATE_LIMIT_ENABLED:
+        check_rate_limit(
+            f"pwreset:{client_ip(raw_request)}:{request.email.lower()}",
+            RESET_MAX_REQUESTS,
+            RESET_WINDOW_SECONDS,
+            "Too many password reset requests. Please try again later.",
+        )
+
+    # Fail identically for every caller when email is unconfigured so the
+    # response never reveals whether an account exists.
+    if not os.getenv("EMAIL_ADDRESS") or not os.getenv("EMAIL_PASSWORD"):
+        logger.error(
+            "Password reset email failed: EMAIL_ADDRESS or EMAIL_PASSWORD is not set in .env."
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Email service is not configured. Set EMAIL_ADDRESS and "
+                "EMAIL_PASSWORD in .env (use a Gmail App Password) to enable "
+                "password reset emails."
+            ),
+        )
+
+    user = db.query(models.User).filter(models.User.email == request.email).first()
+
+    if user is not None:
+        # A new request revokes any previously issued token for this account.
+        db.query(PasswordResetToken).filter(
+            PasswordResetToken.email == request.email
+        ).delete()
+
+        # 256-bit random token. We persist only its SHA-256 digest so the raw
+        # token can never be recovered from the DB; the raw value goes to the
+        # user's inbox.
+        raw_token = secrets.token_urlsafe(32)
+        token_row = PasswordResetToken(
+            email=request.email,
+            token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+            expires_at=datetime.utcnow() + timedelta(minutes=RESET_TOKEN_EXPIRE_MINUTES),
+        )
+        db.add(token_row)
+        db.commit()
+
+        # A runtime SMTP failure must not reveal that the account exists, so
+        # it is logged server-side and swallowed: the caller still gets the
+        # identical generic confirmation. The token stays stored and simply
+        # expires or is replaced by a later request.
+        try:
+            send_password_reset_email(request.email, raw_token)
+        except HTTPException:
+            logger.error(
+                "Password reset email failed to send to %s",
+                request.email,
+                exc_info=True,
+            )
+
+    # Identical response whether or not the email is registered.
+    return {"message": "If an account exists for that email, password reset instructions have been sent."}
+
+
+# ----------------------------
+# Reset Password Route (consumes a single-use token)
+# ----------------------------
+
+@router.post("/reset-password")
+def reset_password(
+    request: ResetPasswordRequest,
+    raw_request: Request,
+    db: Session = Depends(get_db),
+):
+
+    # Throttle token-guessing per IP, mirroring the login brute-force limit.
+    if RATE_LIMIT_ENABLED:
+        check_rate_limit(
+            f"pwreset-consumer:{client_ip(raw_request)}",
+            LOGIN_MAX_ATTEMPTS,
+            LOGIN_WINDOW_SECONDS,
+            "Too many reset attempts. Please try again later.",
+        )
+
+    token_row = (
+        db.query(PasswordResetToken)
+        .filter(
+            PasswordResetToken.token_hash
+            == hashlib.sha256(request.token.encode()).hexdigest()
+        )
+        .first()
+    )
+
+    if token_row is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token.")
+
+    if token_row.expires_at <= datetime.utcnow():
+        # Clean up the stale row on the way out.
+        db.delete(token_row)
+        db.commit()
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token.")
+
+    user = (
+        db.query(models.User)
+        .filter(models.User.email == token_row.email)
+        .first()
+    )
+    if user is None:
+        # Token for an account that no longer exists: invalidate its row.
+        db.delete(token_row)
+        db.commit()
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token.")
+
+    # Same password rules as signup: minimum length, and hash rejects > 4096B.
+    if len(request.new_password) < 6:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 6 characters",
+        )
+    try:
+        hashed_password = hash_password(request.new_password)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Password too long"
+        )
+
+    user.password = hashed_password
+
+    # Single-use: delete the token so it can never be reused.
+    db.delete(token_row)
+    db.commit()
+
+    return {"message": "Password reset successfully. You can now log in."}
 
 
 # ----------------------------

@@ -1,12 +1,17 @@
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { api } from "../../lib/api";
+import { CheckCheck } from "lucide-react";
+import {
+  fetchNotifications,
+  markNotificationRead,
+  markAllNotificationsRead,
+} from "../../lib/notifications";
 
 interface Notification {
   id: number;
   title: string;
   description: string;
-  type: "application" | "interview" | "system";
+  type: "application" | "interview" | "assessment" | "system";
   time: string;
   read: boolean;
 }
@@ -18,57 +23,19 @@ export default function Notifications() {
 
   useEffect(() => {
     let mounted = true;
-    Promise.all([
-      api
-        .get<{
-          id: number;
-          applicant_name: string | null;
-          job_title: string | null;
-          status: string;
-          created_at: string;
-        }[]>("/admin/applications")
-        .catch(() => []),
-      api
-        .get<{
-          id: number;
-          applicant_name: string | null;
-          job_title: string | null;
-          status: string;
-          scheduled_at: string | null;
-        }[]>("/interviews")
-        .catch(() => []),
-    ])
-      .then(([apps, intervs]) => {
+    fetchNotifications()
+      .then((items) => {
         if (!mounted) return;
-        const appNotes: Notification[] = apps.slice(0, 10).map((a) => ({
-          id: a.id,
-          title: "New Application Received",
-          description: `${a.applicant_name || "A candidate"} applied for ${
-            a.job_title || "a role"
-          }`,
-          type: "application",
-          time: new Date(a.created_at).toLocaleString(),
-          read: false,
-        }));
-        const interviewNotes: Notification[] = intervs
-          .slice(0, 10)
-          .map((i) => ({
-            id: i.id + 100000,
-            title: `Interview ${i.status === "completed" ? "Completed" : "Scheduled"}`,
-            description: `${i.applicant_name || "A candidate"} ${
-              i.status === "completed" ? "completed" : "has"
-            } an interview for ${i.job_title || "a role"}${
-              i.scheduled_at
-                ? ` on ${new Date(i.scheduled_at).toLocaleString()}`
-                : ""
-            }`,
-            type: "interview",
-            time: i.scheduled_at
-              ? new Date(i.scheduled_at).toLocaleString()
-              : "Scheduled",
-            read: false,
-          }));
-        setNotifications([...appNotes, ...interviewNotes].slice(0, 15));
+        setNotifications(
+          items.map((n) => ({
+            id: n.id,
+            title: n.title,
+            description: n.message,
+            type: n.type,
+            time: new Date(n.created_at).toLocaleString(),
+            read: n.read,
+          }))
+        );
       })
       .catch((e) => {
         if (mounted)
@@ -83,6 +50,18 @@ export default function Notifications() {
   }, []);
 
   const unreadCount = notifications.filter((n) => !n.read).length;
+
+  const onMarkRead = (id: number) => {
+    setNotifications((notes) =>
+      notes.map((n) => (n.id === id ? { ...n, read: true } : n))
+    );
+    markNotificationRead(id).catch(() => undefined);
+  };
+
+  const onMarkAllRead = () => {
+    setNotifications((notes) => notes.map((n) => ({ ...n, read: true })));
+    markAllNotificationsRead().catch(() => undefined);
+  };
 
   const typeColor = (type: string) => {
     if (type === "application") return "bg-blue-500";
@@ -104,8 +83,19 @@ export default function Notifications() {
           </p>
         </div>
 
-        <div className="px-4 py-2 rounded-full bg-violet-600/20 text-violet-400 font-semibold">
-          {unreadCount} Unread
+        <div className="flex items-center gap-3">
+          <div className="px-4 py-2 rounded-full bg-violet-600/20 text-violet-400 font-semibold">
+            {unreadCount} Unread
+          </div>
+          {unreadCount > 0 && (
+            <button
+              onClick={onMarkAllRead}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-full bg-white/5 border border-white/10 text-gray-300 text-sm hover:bg-white/10 transition"
+            >
+              <CheckCheck size={16} />
+              Mark all read
+            </button>
+          )}
         </div>
       </div>
 
@@ -144,12 +134,12 @@ export default function Notifications() {
             />
 
             {/* Card */}
-            <div
-              className={`p-5 rounded-2xl backdrop-blur-md border shadow-lg transition 
-              ${
+            <button
+              onClick={() => onMarkRead(note.id)}
+              className={`w-full text-left p-5 rounded-2xl backdrop-blur-md border shadow-lg transition cursor-pointer ${
                 note.read
                   ? "bg-white/5 border-white/10"
-                  : "bg-white/10 border-violet-500/30"
+                  : "bg-white/10 border-violet-500/30 hover:bg-white/15"
               }`}
             >
               <div className="flex justify-between items-start mb-2">
@@ -171,7 +161,7 @@ export default function Notifications() {
               <div className="flex justify-between items-center text-sm text-gray-400">
                 <span>{note.time}</span>
               </div>
-            </div>
+            </button>
           </motion.div>
         ))}
       </div>
