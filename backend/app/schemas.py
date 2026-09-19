@@ -11,6 +11,7 @@ from app.models import (
     MockInterviewStatusEnum,
     AssessmentStatusEnum,
     CodingTestStatusEnum,
+    NotificationType,
 )
 
 
@@ -837,3 +838,19 @@ class VideoInterviewAnswerResponse(BaseModel):
     session: VideoInterviewDetailOut
     evaluation: EvaluationOut
     next_question: Optional[MockInterviewQuestionOut] = None
+
+
+# -----------------------------
+# Notifications
+# -----------------------------
+class NotificationOut(BaseModel):
+    id: int
+    type: NotificationType
+    title: str
+    message: str
+    link: Optional[str] = None
+    read: bool = False
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

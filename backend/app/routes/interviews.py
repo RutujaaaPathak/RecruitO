@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.deps import get_db, get_company_for_user, require_company_approved
 from app.auth import get_current_user, RoleChecker
 from app import models, schemas
+from app.services.notifications import create_notification
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 
@@ -141,6 +142,22 @@ def create_interview(
     # Update application status to shortlisted when interview is scheduled
     application.status = models.ApplicationStatusEnum.shortlisted
 
+    # Notify the candidate that their interview has been scheduled.
+    job = (
+        db.query(models.Job).filter(models.Job.id == interview.job_id).first()
+    )
+    create_notification(
+        db,
+        application.user_id,
+        type=models.NotificationType.interview,
+        title="Interview Scheduled",
+        message=(
+            f"Your interview for {job.title if job else 'this position'} has "
+            "been scheduled."
+        ),
+        link="/dashboard/interview",
+    )
+
     db.commit()
     db.refresh(interview)
     return _enrich(interview)
@@ -258,6 +275,36 @@ def update_interview(
             application.status = models.ApplicationStatusEnum.interviewed
         elif interview.status == models.InterviewStatusEnum.cancelled:
             application.status = models.ApplicationStatusEnum.applied
+
+    # Notify the candidate when the interview is completed or cancelled.
+    if (
+        application is not None
+        and interview.status
+        in (models.InterviewStatusEnum.completed, models.InterviewStatusEnum.cancelled)
+    ):
+        job = (
+            db.query(models.Job)
+            .filter(models.Job.id == interview.job_id)
+            .first()
+        )
+        create_notification(
+            db,
+            application.user_id,
+            type=models.NotificationType.interview,
+            title=(
+                "Interview Completed"
+                if interview.status == models.InterviewStatusEnum.completed
+                else "Interview Cancelled"
+            ),
+            message=(
+                f"Your interview for {job.title if job else 'this position'} "
+                "has been completed."
+                if interview.status == models.InterviewStatusEnum.completed
+                else f"Your interview for {job.title if job else 'this position'} "
+                "has been cancelled."
+            ),
+            link="/dashboard/interview",
+        )
 
     db.commit()
     db.refresh(interview)

@@ -10,6 +10,7 @@ from app.services.skill_gap import analyze_skill_gap
 from app.services.semantic_matcher import compute_semantic_score
 from app.services.career_recommendations import generate_career_recommendations
 from app.services.resume_retriever import retrieve_chunks_for_job
+from app.services.notifications import create_notification
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 
@@ -100,6 +101,23 @@ def create_application(
         match_score=match_score,
     )
     db.add(application)
+
+    # Notify the job's owning company that a candidate applied.
+    company = (
+        db.query(models.Company)
+        .filter(models.Company.id == job.company_id)
+        .first()
+    )
+    if company is not None:
+        create_notification(
+            db,
+            company.user_id,
+            type=models.NotificationType.application,
+            title="New Application",
+            message=f"{current_user.name} applied for {job.title}",
+            link="/company/applicants",
+        )
+
     db.commit()
     db.refresh(application)
     return _enrich(application)

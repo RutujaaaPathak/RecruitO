@@ -1,6 +1,7 @@
-import { Bell, Sun, Moon, User } from "lucide-react";
+import { Sun, Moon, User } from "lucide-react";
 import useTheme from "./hooks/useTheme";
 import { useNavigate } from "react-router-dom";
+import NotificationsBell from "../../components/NotificationsBell";
 
 export default function Navbar(): JSX.Element {
   const { theme, setTheme } = useTheme();
@@ -65,16 +66,7 @@ export default function Navbar(): JSX.Element {
         </button>
 
         {/* Notifications */}
-        <button
-          className="
-            p-2 rounded-lg
-            hover:bg-gray-200 dark:hover:bg-gray-700
-            transition-colors duration-200
-            text-gray-700 dark:text-gray-300
-          "
-        >
-          <Bell size={18} />
-        </button>
+        <NotificationsBell buttonClassName="hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300" />
 
         {/* Profile Button */}
         <button

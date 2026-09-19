@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useAuthStore } from "../../store/AuthStore";
+import NotificationsBell from "../../components/NotificationsBell";
 
 export default function DashboardLayout() {
   const navigate = useNavigate();
@@ -101,6 +102,9 @@ export default function DashboardLayout() {
           <h1 className="text-3xl font-semibold">
             User Dashboard
           </h1>
+
+          {/* Notifications */}
+          <NotificationsBell buttonClassName="hover:bg-white/5 text-gray-300" />
 
           {/* Profile Avatar */}
           <Avatar

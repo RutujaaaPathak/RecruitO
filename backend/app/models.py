@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     UniqueConstraint,
+    Index,
 )
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -110,6 +111,10 @@ class User(Base):
     )
     video_interviews = relationship(
         "VideoInterview", back_populates="user", cascade="all, delete-orphan"
+    )
+
+    notifications = relationship(
+        "Notification", back_populates="user", cascade="all, delete-orphan"
     )
 
 
@@ -1003,3 +1008,45 @@ class VideoInterview(Base):
         cascade="all, delete-orphan",
         order_by="MockInterviewQuestion.question_index",
     )
+
+
+# -----------------------------
+# Notifications
+# -----------------------------
+class NotificationType(str, enum.Enum):
+    application = "application"
+    interview = "interview"
+    assessment = "assessment"
+    system = "system"
+
+
+class Notification(Base):
+    """A persistent in-app notification delivered to a single user.
+
+    Created when an important event happens (new application, interview
+    scheduled/completed/cancelled, company approval, ...) and consumed via the
+    /notifications endpoints. Always scoped to ``user_id``: every read/mutation
+    is filtered by the current user so one account can never see another's.
+    """
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        # Fast unread-listing / unread-count for a user's inbox.
+        Index("ix_notifications_user_read", "user_id", "read"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id"), nullable=False, index=True
+    )
+    type = Column(
+        Enum(NotificationType, name="notificationtypeenum"),
+        nullable=False,
+    )
+    title = Column(String, nullable=False)
+    message = Column(Text, nullable=False)
+    link = Column(String, nullable=True)
+    read = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user = relationship("User", back_populates="notifications")
