@@ -1,5 +1,5 @@
 # pyrefly: ignore [missing-import]
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 # pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
 # pyrefly: ignore [missing-import]
@@ -17,6 +17,7 @@ from app.utils import hash_password, verify_password
 from app.models import RoleEnum, EmailOTP
 from app.auth import create_access_token, get_current_user, RoleChecker
 from app.config import load_env
+from app.rate_limit import client_ip, check_rate_limit, reset_rate_limit
 
 # Load .env variables (anchored to the project root)
 load_env()
@@ -36,6 +37,19 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 # For LOCAL DEVELOPMENT / TESTING only, set BYPASS_EMAIL_OTP=true in .env to
 # skip sending and checking the OTP. Production must leave it unset or false.
 BYPASS_EMAIL_OTP = os.getenv("BYPASS_EMAIL_OTP", "false").strip().lower() in ("1", "true", "yes", "on")
+
+# ----------------------------
+# Rate Limiting Config
+# ----------------------------
+# In-memory sliding-window rate limiting for auth endpoints (send/resend OTP,
+# login). State never touches the DB and resets on process restart.
+# Defaults: ON, 5 login attempts / 5 min, 3 OTP requests / 60s per IP + email.
+# Disable only for local development/testing via RATE_LIMIT_ENABLED=false.
+RATE_LIMIT_ENABLED = os.getenv("RATE_LIMIT_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+LOGIN_MAX_ATTEMPTS = int(os.getenv("LOGIN_MAX_ATTEMPTS", "5"))
+LOGIN_WINDOW_SECONDS = int(os.getenv("LOGIN_WINDOW_SECONDS", "300"))
+OTP_MAX_REQUESTS = int(os.getenv("OTP_MAX_REQUESTS", "3"))
+OTP_WINDOW_SECONDS = int(os.getenv("OTP_WINDOW_SECONDS", "60"))
 
 router = APIRouter()
 
@@ -152,7 +166,20 @@ def send_email_otp(receiver_email: str, otp: str):
 # ----------------------------
 
 @router.post("/send-otp")
-def send_otp(request: SendOTPRequest, db: Session = Depends(get_db)):
+def send_otp(
+    request: SendOTPRequest,
+    raw_request: Request,
+    db: Session = Depends(get_db),
+):
+
+    # Rate-limit OTP requests per IP + email to prevent abuse/spam.
+    if RATE_LIMIT_ENABLED:
+        check_rate_limit(
+            f"otp:{client_ip(raw_request)}:{request.email.lower()}",
+            OTP_MAX_REQUESTS,
+            OTP_WINDOW_SECONDS,
+            "Too many OTP requests. Please try again later.",
+        )
 
     # Delete previous OTPs for this email
     db.query(EmailOTP).filter(EmailOTP.email == request.email).delete()
@@ -181,7 +208,16 @@ def send_otp(request: SendOTPRequest, db: Session = Depends(get_db)):
 # ----------------------------
 
 @router.post("/resend-otp")
-def resend_otp(request: SendOTPRequest, db: Session = Depends(get_db)):
+def resend_otp(request: SendOTPRequest, raw_request: Request, db: Session = Depends(get_db)):
+
+    # Rate-limit OTP requests per IP + email to prevent spam/abuse.
+    if RATE_LIMIT_ENABLED:
+        check_rate_limit(
+            f"otp:{client_ip(raw_request)}:{request.email.lower()}",
+            OTP_MAX_REQUESTS,
+            OTP_WINDOW_SECONDS,
+            "Too many OTP requests. Please try again later.",
+        )
 
     # Remove old OTPs
     db.query(EmailOTP).filter(EmailOTP.email == request.email).delete()
@@ -293,7 +329,22 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
 # ----------------------------
 
 @router.post("/login")
-def login(request: LoginRequest, db: Session = Depends(get_db)):
+def login(
+    request: LoginRequest,
+    raw_request: Request,
+    db: Session = Depends(get_db),
+):
+
+    # Rate-limit login attempts per IP + email to thwart brute force.
+    login_key = f"login:{client_ip(raw_request)}:{request.email.lower()}"
+    if RATE_LIMIT_ENABLED:
+        check_rate_limit(
+            login_key,
+            LOGIN_MAX_ATTEMPTS,
+            LOGIN_WINDOW_SECONDS,
+            "Too many login attempts. Please try again later.",
+        )
+
     user = db.query(models.User).filter(models.User.email == request.email).first()
     if not user:
         raise HTTPException(
@@ -306,6 +357,10 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid email or password"
         )
+
+    # On successful login, clear the failed-attempts bucket for this caller.
+    if RATE_LIMIT_ENABLED:
+        reset_rate_limit(login_key)
 
     # Create access token including email (sub), id, and role in the payload
     access_token = create_access_token({
