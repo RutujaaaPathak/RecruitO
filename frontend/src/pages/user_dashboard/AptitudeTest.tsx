@@ -199,6 +199,7 @@ export default function AptitudeTest() {
   const [submitting, setSubmitting] = useState(false);
 
   const submittingRef = useRef(false);
+  const autoSubmittedRef = useRef(false);
   const [timerLeft, setTimerLeft] = useState<number | null>(null);
 
   // -------------------------------------------------------------------------
@@ -215,6 +216,7 @@ export default function AptitudeTest() {
   }, []);
 
   const openTest = useCallback(async (id: number): Promise<void> => {
+    autoSubmittedRef.current = false;
     const data = await api.get<AptitudeTestDetailOut>(`/aptitude-tests/${id}`);
     setDetail(data);
 
@@ -288,6 +290,7 @@ export default function AptitudeTest() {
   // -------------------------------------------------------------------------
 
   const startTest = async (appId: number): Promise<void> => {
+    autoSubmittedRef.current = false;
     setStartingId(appId);
     setActionError(null);
     try {
@@ -374,14 +377,14 @@ export default function AptitudeTest() {
 
     setSaving(true);
     try {
-      await api.post<AptitudeTestDetailOut>(
+      const updated = await api.post<AptitudeTestDetailOut>(
         `/aptitude-tests/${detail.id}/answer`,
         {
           question_index: currentQuestion.question_index,
           selected_option: selected,
         }
       );
-      // The backend response carries the refreshed saved selection + count.
+      setDetail(updated);
     } catch (e) {
       setActionError(
         errMessage(e, "Failed to save this answer. Check the timer.")
@@ -412,7 +415,13 @@ export default function AptitudeTest() {
     setSubmitting(true);
     setActionError(null);
     try {
-      await saveCurrentAnswer();
+      try {
+        await saveCurrentAnswer();
+      } catch {
+        // The backend rejects an answer save once the timer has elapsed, but
+        // submission must still happen: /submit re-checks the deadline and
+        // scores the answers that were saved before it (results.expired=true).
+      }
       // The backend enforces the deadline: a late submit is auto-scored from
       // the answers saved before the timer ran out (results.expired = true).
       const res = await api.post<AptitudeResultsOut>(
@@ -420,10 +429,13 @@ export default function AptitudeTest() {
       );
       setResults(res);
       setDetail((prev) =>
-        prev ? { ...prev, status: "completed" as const } : prev
+        prev
+          ? { ...prev, status: "completed" as const, expires_at: null }
+          : prev
       );
       setView("results");
     } catch (e) {
+      if (auto) autoSubmittedRef.current = false; // retry on the next tick
       setActionError(errMessage(e, "Failed to submit the aptitude test"));
     } finally {
       submittingRef.current = false;
@@ -443,7 +455,12 @@ export default function AptitudeTest() {
         (new Date(detail.expires_at as string).getTime() - Date.now()) / 1000
       );
       setTimerLeft(remaining);
-      if (remaining <= 0 && !submittingRef.current) {
+      if (
+        remaining <= 0 &&
+        !submittingRef.current &&
+        !autoSubmittedRef.current
+      ) {
+        autoSubmittedRef.current = true;
         void submitRef.current(true);
       }
     };
