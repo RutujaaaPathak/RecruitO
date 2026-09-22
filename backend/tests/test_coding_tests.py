@@ -26,6 +26,7 @@ from app.models import (  # noqa: E402
 from app.routes.coding_tests import (  # noqa: E402
     _detail,
     _ensure_answerable,
+    _ensure_code_valid,
     _list_out,
     _owned_application,
     _owned_test,
@@ -232,6 +233,27 @@ def test_validate_code_rejects_empty_and_oversized():
     with pytest.raises(ValueError):
         validate_code("print(1)", "ruby")
     validate_code("print(1)", "python")  # no raise
+
+
+def test_ensure_code_valid_matches_executor_limit():
+    """The route guard must reject the same oversized code the executor later
+    would, so callers get a clean 400 instead of an uncaught ValueError (500)."""
+    from fastapi import HTTPException
+
+    oversized = SimpleNamespace(code="x" * (MAX_CODE_LENGTH + 1))
+    with pytest.raises(HTTPException) as excinfo:
+        _ensure_code_valid(oversized)
+    assert excinfo.value.status_code == 400
+    assert "maximum allowed length" in str(excinfo.value.detail)
+
+    at_limit = SimpleNamespace(code="x" * MAX_CODE_LENGTH)
+    _ensure_code_valid(at_limit)  # exactly at the cap is still runnable
+
+    empty = SimpleNamespace(code="   ")
+    with pytest.raises(HTTPException) as excinfo:
+        _ensure_code_valid(empty)
+    assert excinfo.value.status_code == 400
+    assert "empty" in str(excinfo.value.detail)
 
 
 # ---------------------------------------------------------------------------

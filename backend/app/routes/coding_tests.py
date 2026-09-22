@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.deps import get_db
 from app.auth import RoleChecker
 from app import models, schemas
-from app.services.code_executor import execute_code
+from app.services.code_executor import MAX_CODE_LENGTH, execute_code
 from app.services.coding_tests import (
     create_test_problems,
     finalize_test,
@@ -199,10 +199,13 @@ def _ensure_code_valid(payload: schemas.CodingRunIn) -> None:
     """Raise for empty / oversized / unsupported code before execution."""
     if not payload.code.strip():
         raise HTTPException(status_code=400, detail="Code cannot be empty")
-    if len(payload.code) > 256 * 1024:
+    if len(payload.code) > MAX_CODE_LENGTH:
         raise HTTPException(
             status_code=400,
-            detail="Code exceeds the maximum allowed length (256 KB)",
+            detail=(
+                "Code exceeds the maximum allowed length "
+                f"({MAX_CODE_LENGTH // 1024} KB)"
+            ),
         )
 
 

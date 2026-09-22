@@ -522,6 +522,140 @@ def test_finalize_test_is_idempotent_and_sticky_on_expiry():
 
 
 # ---------------------------------------------------------------------------
+# Complete submit -> results flow
+# ---------------------------------------------------------------------------
+
+def _mixed_attempt_test(**kw):
+    """A 5-question test spanning all three sections with one correct and one
+    wrong answer saved; questions 2-4 are left unanswered."""
+    test = _test(
+        id=9,
+        total_questions=5,
+        started_at=datetime(2026, 1, 1, 10, 0, 0),
+        **kw,
+    )
+    q0 = _question(30, 0, correct=1, category="quantitative")
+    q1 = _question(31, 1, correct=3, category="logical_reasoning")
+    q2 = _question(32, 2, correct=0, category="verbal")
+    q3 = _question(33, 3, correct=2, category="quantitative")
+    q4 = _question(34, 4, correct=1, category="logical_reasoning")
+    test.questions = [q0, q1, q2, q3, q4]
+    test.answers = [
+        _answer(20, q0.id, selected=1, correct=True),
+        _answer(21, q1.id, selected=2, correct=False),
+    ]
+    return test
+
+
+def test_complete_submit_flow_produces_results_payload():
+    test = _mixed_attempt_test()
+    results = finalize_test(test, expired=False)
+
+    assert test.status == AssessmentStatusEnum.completed
+    assert test.completed_at is not None
+    assert results["score"] == 1
+    assert results["total"] == 5
+    assert results["percentage"] == 20
+    assert results["correct_count"] == 1
+    assert results["incorrect_count"] == 1
+    assert results["unanswered_count"] == 3
+    assert results["passed"] is False
+    assert results["expired"] is False
+
+    payload = _results_out(test)
+    assert payload is not None
+    assert payload.score == 1
+    assert payload.total == 5
+    assert payload.percentage == 20
+    assert payload.correct_count == 1
+    assert payload.incorrect_count == 1
+    assert payload.unanswered_count == 3
+    assert payload.passed is False
+    assert payload.pass_percentage == DEFAULT_PASS_PERCENTAGE
+    assert payload.expired is False
+    assert payload.notice is None
+
+    cats = {c.category: c for c in payload.category_performance}
+    assert set(cats) == {"quantitative", "logical_reasoning", "verbal"}
+    assert cats["quantitative"].percentage == 50
+    assert cats["logical_reasoning"].percentage == 0
+    assert cats["verbal"].percentage == 0
+
+    raw = payload.model_dump_json()
+    assert "correct_option_index" not in raw
+    assert "correct_index" not in raw
+
+
+def test_complete_submit_flow_all_correct_passes():
+    test = _test(id=10, total_questions=4)
+    questions = [
+        _question(40, 0, correct=0),
+        _question(41, 1, correct=3),
+        _question(42, 2, correct=1),
+        _question(43, 3, correct=2),
+    ]
+    test.questions = questions
+    test.answers = [
+        _answer(30, q.id, selected=q.correct_option_index, correct=True)
+        for q in questions
+    ]
+
+    results = finalize_test(test, expired=False)
+    assert results["score"] == 4
+    assert results["percentage"] == 100
+    assert results["incorrect_count"] == 0
+    assert results["unanswered_count"] == 0
+    assert results["passed"] is True
+
+    payload = _results_out(test)
+    assert payload is not None
+    assert payload.passed is True
+    assert payload.percentage == 100
+
+
+def test_expired_submit_flow_marks_expiry_and_notice():
+    test = _mixed_attempt_test()
+    results = finalize_test(test, expired=True)
+
+    assert test.status == AssessmentStatusEnum.completed
+    assert test.expired is True
+    assert test.result_notice == EXPIRY_NOTICE
+    assert results["expired"] is True
+    assert results["score"] == 1  # only answers saved before the deadline count
+
+    payload = _results_out(test)
+    assert payload is not None
+    assert payload.expired is True
+    assert payload.notice == EXPIRY_NOTICE
+
+
+def test_zero_score_submit_flow_serializes_zero_not_none():
+    test = _test(
+        id=11,
+        status=AssessmentStatusEnum.completed,
+        total_questions=3,
+        total_scored=3,
+        score=0,
+        percentage=0,
+        correct_count=0,
+        incorrect_count=0,
+        unanswered_count=3,
+        passed=False,
+        pass_percentage=DEFAULT_PASS_PERCENTAGE,
+        completed_at=datetime(2026, 1, 1, 10, 10, 0),
+        category_performance=[],
+    )
+    test.questions = []
+    test.answers = []
+    payload = _results_out(test)
+    assert payload is not None
+    assert payload.score == 0
+    assert payload.percentage == 0
+    assert payload.correct_count == 0
+    assert payload.unanswered_count == 3
+
+
+# ---------------------------------------------------------------------------
 # Serialization / answer security
 # ---------------------------------------------------------------------------
 

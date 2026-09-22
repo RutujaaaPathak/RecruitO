@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   BarChart,
@@ -279,6 +279,19 @@ export default function VideoInterview() {
     });
   }, []);
 
+  // The <video> element only mounts once the room view renders (or when the
+  // camera is toggled back on), which can be *after* the stream was captured —
+  // e.g. attachStream() runs while the home view is still mounted on a fresh
+  // start. Re-attach the live stream to the element whenever it (re)mounts so
+  // the preview never stays black even though the camera is actually on.
+  useEffect(() => {
+    const video = videoRef.current;
+    const s = streamRef.current;
+    if (!video || !s) return;
+    if (video.srcObject !== s) video.srcObject = s;
+    void video.play().catch(() => undefined);
+  }, [stream, cameraOn, view]);
+
   // -------------------------------------------------------------------------
   // Data loading
   // -------------------------------------------------------------------------
@@ -362,18 +375,20 @@ export default function VideoInterview() {
       // Grab the device streams first (the click is a user gesture, so the
       // permission prompt is allowed) and report the live state on creation.
       acquired = await requestStream().catch(() => null);
+      // A brand-new session always starts with the camera and microphone on,
+      // regardless of whatever the previous room's toggles were left at.
       const created = await api.post<VideoInterviewDetailOut>(
         "/video-interviews",
         {
           application_id: appId,
           interview_type: interviewType,
-          camera_enabled: cameraOn,
-          microphone_enabled: micOn,
+          camera_enabled: true,
+          microphone_enabled: true,
         }
       );
       setActive(created);
-      setCameraOn(created.camera_enabled);
-      setMicOn(created.microphone_enabled);
+      setCameraOn(true);
+      setMicOn(true);
       setAnswer("");
       setEvaluation(null);
       setSessions((prev) => [created, ...prev.filter((s) => s.id !== created.id)]);
@@ -542,6 +557,22 @@ export default function VideoInterview() {
     void syncDeviceState(next, micOn);
   }, [cameraOn, micOn, active, syncDeviceState]);
 
+  // Explicit camera/mic request re-armed behind a real user gesture. Used
+  // when the room opens without a live stream — after a permission denial, or
+  // when resuming from a page refresh where getUserMedia() ran without a user
+  // gesture and browsers refused it — so the interview is never stuck with no
+  // way to re-enable the devices.
+  const enableCamera = useCallback(async (): Promise<void> => {
+    setErr(null);
+    try {
+      const s = await requestStream();
+      await attachStream(s);
+      applyState(s, cameraOn, micOn);
+    } catch (e) {
+      setErr(mediaErr(e));
+    }
+  }, [requestStream, attachStream, applyState, cameraOn, micOn]);
+
   // -------------------------------------------------------------------------
   // Derived state
   // -------------------------------------------------------------------------
@@ -680,7 +711,12 @@ export default function VideoInterview() {
         ) : (
           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
             {apps.map((app, index) => {
-              const selectedType = startTypes[app.id] ?? "technical";
+              const defaultType: InterviewType =
+                typeof window !== "undefined" &&
+                new URLSearchParams(window.location.search).get("type") === "hr"
+                  ? "hr"
+                  : "technical";
+              const selectedType = startTypes[app.id] ?? defaultType;
               const inProgress = sessions.find(
                 (s) =>
                   s.status === "in_progress" &&
@@ -878,10 +914,19 @@ export default function VideoInterview() {
         )}
 
         {!stream && (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <p className="text-xs text-white/40">
-              Camera unavailable — check your device permissions.
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/40">
+            <p className="text-xs text-white/50">
+              {cameraOn && micOn
+                ? "Camera feed unavailable."
+                : "Camera is off."}
             </p>
+            <button
+              type="button"
+              onClick={() => void enableCamera()}
+              className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-4 py-2 text-xs font-medium text-white transition hover:bg-white/20"
+            >
+              <Camera size={14} /> Enable camera & mic
+            </button>
           </div>
         )}
       </div>

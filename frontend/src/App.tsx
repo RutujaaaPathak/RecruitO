@@ -22,6 +22,8 @@ const MCQAssessment = lazy(() => import("./pages/user_dashboard/MCQAssessment"))
 const CodingTest = lazy(() => import("./pages/user_dashboard/CodingTest"));
 const AptitudeTest = lazy(() => import("./pages/user_dashboard/AptitudeTest"));
 const VideoInterview = lazy(() => import("./pages/user_dashboard/VideoInterview"));
+const MockPractice = lazy(() => import("./pages/user_dashboard/MockPractice"));
+const CompanyAssessments = lazy(() => import("./pages/user_dashboard/CompanyAssessments"));
 const Settings = lazy(() => import("./pages/user_dashboard/Settings"));
 const Interviews = lazy(() => import("./pages/user_dashboard/Interviews"));
 const UserApplications = lazy(() => import("./pages/user_dashboard/UserApplications"));
@@ -88,6 +90,8 @@ function App() {
             <Route path="coding-test" element={<CodingTest />} />
             <Route path="aptitude-test" element={<AptitudeTest />} />
             <Route path="video-interview" element={<VideoInterview />} />
+            <Route path="mock-practice" element={<MockPractice />} />
+            <Route path="company-assessments" element={<CompanyAssessments />} />
             <Route path="settings" element={<Settings />} />
             <Route path="interview" element={<Interviews />} />
           </Route>

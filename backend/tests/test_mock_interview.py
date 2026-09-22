@@ -23,6 +23,7 @@ from app.models import (  # noqa: E402
 from app.routes.mock_interviews import (  # noqa: E402
     _detail,
     _evaluation_out,
+    _owned_application,
     _owned_interview,
     _question_out,
 )
@@ -634,6 +635,35 @@ def test_owned_interview_owner_allowed():
     interview = _owned_interview(FakeSession([_interview(user_id=1)]),
                                  _user(RoleEnum.user, id_=1), 10)
     assert interview.id == 10
+
+
+def test_owned_application_missing_returns_404():
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        _owned_application(FakeSession([]), _user(RoleEnum.user), 1)
+    assert exc.value.status_code == 404
+
+
+def test_owned_application_other_user_returns_403():
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        _owned_application(
+            FakeSession([SimpleNamespace(id=1, user_id=2)]),
+            _user(RoleEnum.user, id_=1),
+            1,
+        )
+    assert exc.value.status_code == 403
+
+
+def test_owned_application_owner_allowed():
+    app_ = _owned_application(
+        FakeSession([SimpleNamespace(id=1, user_id=1)]),
+        _user(RoleEnum.user, id_=1),
+        1,
+    )
+    assert app_.id == 1
 
 
 # ---------------------------------------------------------------------------

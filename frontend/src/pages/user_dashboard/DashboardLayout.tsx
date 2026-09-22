@@ -32,22 +32,35 @@ export default function DashboardLayout() {
     }
   }, []);
 
-  const navItems = [
-    { name: "Dashboard", path: "/dashboard" },
-    { name: "Profile", path: "/dashboard/profile" },
-    { name: "Jobs", path: "/dashboard/jobs" },
-    { name: "Internships", path: "/dashboard/internships" },
-    { name: "Applications", path: "/dashboard/applications" },
-    { name: "Interview", path: "/dashboard/interview"},
-    { name: "Resume", path: "/dashboard/resume" },
-    { name: "AI Chatbot", path: "/dashboard/chatbot" },
-    { name: "Mock Interview", path: "/dashboard/mock-interview" },
-    { name: "MCQ Assessment", path: "/dashboard/mcq-assessment" },
-    { name: "Coding Test", path: "/dashboard/coding-test" },
-    { name: "Aptitude Test", path: "/dashboard/aptitude-test" },
-    { name: "Video Interview", path: "/dashboard/video-interview" },
-    { name: "Settings", path: "/dashboard/settings" },
-    
+  const navGroups: {
+    label: string | null;
+    items: { name: string; path: string }[];
+  }[] = [
+    {
+      label: null,
+      items: [
+        { name: "Dashboard", path: "/dashboard" },
+        { name: "Profile", path: "/dashboard/profile" },
+        { name: "Jobs", path: "/dashboard/jobs" },
+        { name: "Internships", path: "/dashboard/internships" },
+        { name: "Applications", path: "/dashboard/applications" },
+        { name: "Interview", path: "/dashboard/interview" },
+        { name: "Resume", path: "/dashboard/resume" },
+        { name: "AI Chatbot", path: "/dashboard/chatbot" },
+      ],
+    },
+    {
+      label: "Company Assessments",
+      items: [{ name: "Company Assessments", path: "/dashboard/company-assessments" }],
+    },
+    {
+      label: "Mock Practice",
+      items: [{ name: "Mock Practice", path: "/dashboard/mock-practice" }],
+    },
+    {
+      label: null,
+      items: [{ name: "Settings", path: "/dashboard/settings" }],
+    },
   ];
 
   return (
@@ -64,21 +77,30 @@ export default function DashboardLayout() {
         </h2>
 
         <nav className="space-y-2 flex-1">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.name}
-              to={item.path}
-              end={item.path === "/dashboard"}
-              className={({ isActive }) =>
-                `block px-4 py-2 rounded-lg transition-all ${
-                  isActive
-                    ? "bg-gradient-to-r from-violet-600 to-blue-600 text-white shadow-lg"
-                    : "hover:bg-white/5"
-                }`
-              }
-            >
-              {item.name}
-            </NavLink>
+          {navGroups.map((group) => (
+            <div key={group.label ?? `core-${group.items[0].path}`} className="space-y-2">
+              {group.label && (
+                <p className="px-4 pt-4 text-[11px] font-semibold uppercase tracking-widest text-white/40">
+                  {group.label}
+                </p>
+              )}
+              {group.items.map((item) => (
+                <NavLink
+                  key={item.path}
+                  to={item.path}
+                  end={item.path === "/dashboard"}
+                  className={({ isActive }) =>
+                    `block px-4 py-2 rounded-lg transition-all ${
+                      isActive
+                        ? "bg-gradient-to-r from-violet-600 to-blue-600 text-white shadow-lg"
+                        : "hover:bg-white/5"
+                    }`
+                  }
+                >
+                  {item.name}
+                </NavLink>
+              ))}
+            </div>
           ))}
         </nav>
 

@@ -28,11 +28,24 @@ from app.routes.video_interviews import (  # noqa: E402
     _owned_application,
     _owned_session,
     _questions,
+    _report_out,
 )
 from app.services.video_interview import (  # noqa: E402
     apply_device_state,
     end_session,
     session_duration_seconds,
+)
+from app.services.mock_interview import (  # noqa: E402
+    CATEGORIES,
+    HR_CATEGORIES,
+    InterviewContext,
+    apply_evaluation,
+    apply_report,
+    build_qa_pairs,
+    build_question_row,
+    category_for_index,
+    fallback_report,
+    max_questions,
 )
 
 
@@ -495,3 +508,172 @@ def test_reused_hr_report_prompt_matches_mock_interview_persona():
     from app.services.mock_interview import HR_REPORT_SYSTEM_PROMPT
 
     assert "HR interviewer inside RecruitO" in HR_REPORT_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Submit / evaluation flow (matches the route orchestration)
+# ---------------------------------------------------------------------------
+
+def _ctx(**overrides):
+    base = dict(
+        user_name="Sara Chen",
+        user_email="sara@example.com",
+        profile_skills=["python", "django"],
+        resume_text="Python developer with Django and Docker experience.",
+        job_title="Backend Engineer",
+        job_company="Acme Inc",
+        job_skills=["python", "aws", "kubernetes"],
+        job_description="Backend engineer. Requires Python and AWS.",
+        ats_score=62,
+        semantic_score=71,
+        retrieved_chunks=[],
+        model_used="all-MiniLM-L6-v2",
+        used_fallback=False,
+        matched_skills=["python"],
+        missing_skills=["aws", "kubernetes"],
+    )
+    base.update(overrides)
+    return InterviewContext(**base)
+
+
+def _answered_row(session, index, category, answer, score):
+    """A persisted-shaped answered question row like the answer route builds."""
+    row = build_question_row(
+        None,
+        index,
+        category,
+        {"question_text": f"Question {index}", "generated_by": "llm", "notice": None},
+        [],
+        video_interview_id=session.id,
+    )
+    row.id = index + 1
+    apply_evaluation(
+        row,
+        answer,
+        {
+            "score": score,
+            "correctness": f"Correctness {index}",
+            "strengths": [f"Strength {index}"] if index % 2 == 0 else [],
+            "weaknesses": [f"Weakness {index}"] if index % 2 == 1 else [],
+            "missing_points": [],
+            "feedback": f"Feedback {index}",
+            "generated_by": "fallback",
+            "notice": None,
+        },
+    )
+    return row
+
+
+def test_submit_flow_progresses_to_the_last_question_then_stops():
+    """The answer route's chain: every answer advances `current_question` and
+    increments `answered_count`; once the configured cap is reached no new
+    questions appear and `current_question` becomes None (the client can end)."""
+    session = _labeled_session()
+    total = max_questions()
+    session.questions = []
+
+    for index in range(total):
+        current = _current_question(session)
+        assert current is None or current.question_index == index
+        session.questions.append(
+            _answered_row(
+                session,
+                index,
+                category_for_index(index, "technical"),
+                f"Answer {index}",
+                8,
+            )
+        )
+        assert _answered_count(session) == index + 1
+        detail = _detail(session)
+        if index < total - 1:
+            assert detail.current_question is None or (
+                detail.current_question.question_index == index + 1
+            )
+
+    assert _answered_count(session) == total
+    assert _current_question(session) is None
+    assert _detail(session).current_question is None
+
+
+def test_end_flow_generates_report_from_answered_questions():
+    """`end_session` + `fallback_report` + `apply_report` leaves the session
+    completed and its `overall_score`/categories/summary exposed via `_detail`,
+    mirroring the `/video-interviews/{id}/end` handler."""
+    session = _labeled_session()
+    session.questions = [
+        _answered_row(session, 0, "technical", "Threads share memory.", 8),
+        _answered_row(session, 1, "project_experience", "Led a migration.", 6),
+    ]
+
+    assert end_session(session) is True
+    report = fallback_report(_ctx(), build_qa_pairs(list(session.questions)))
+    apply_report(session, report)
+
+    assert session.status == AssessmentStatusEnum.completed
+    out = _report_out(session)
+    assert out is not None
+    assert out.overall_score == 7  # (8 + 6) / 2
+    assert {c.category for c in out.category_scores} == {
+        "project_experience",
+        "technical",
+    }
+    assert "7/10 across 2 answered questions" in out.summary
+    assert "Strength 0" in out.strengths
+
+    detail = _detail(session)
+    assert detail.status == AssessmentStatusEnum.completed
+    assert detail.overall_score == 7
+    assert detail.ended_at is not None
+
+
+def test_qa_pairs_skip_unanswered_questions():
+    """The report is grounded only in answered questions — a pending question
+    must never leak into the final evaluation."""
+    session = _labeled_session()
+    session.questions = [
+        _answered_row(session, 0, "technical", "Threads share memory.", 8),
+        _answered_row(session, 1, "behavioral", "Tell about a conflict.", 7),
+    ]
+    pending = build_question_row(
+        None,
+        2,
+        "problem_solving",
+        {"question_text": "Question 2", "generated_by": "llm", "notice": None},
+        [],
+        video_interview_id=session.id,
+    )
+    pending.id = 3
+    session.questions.append(pending)
+
+    pairs = build_qa_pairs(list(session.questions))
+    assert len(pairs) == 2
+    assert all(p["score"] in (7, 8) for p in pairs)
+
+
+def test_early_end_without_answers_generates_baseline_report():
+    """Ending before answering anything completes the session with a baseline
+    report instead of failing, so the client always gets a finishable flow."""
+    session = _labeled_session()
+    session.questions = []
+
+    assert end_session(session) is True
+    report = fallback_report(_ctx(), build_qa_pairs(list(session.questions)))
+    apply_report(session, report)
+
+    assert session.status == AssessmentStatusEnum.completed
+    out = _report_out(session)
+    assert out is not None
+    assert out.overall_score == 0
+    assert out.category_scores == []
+    assert "before any question was answered" in out.summary
+
+
+def test_category_rotation_follows_interview_type():
+    """Technical and HR sessions rotate through their own category lists, so a
+    full-length session never repeats the same category back to back."""
+    total = max_questions()
+    tec = [category_for_index(i, "technical") for i in range(total)]
+    hr = [category_for_index(i, "hr") for i in range(total)]
+    assert tec == [CATEGORIES[i % len(CATEGORIES)] for i in range(total)]
+    assert hr == [HR_CATEGORIES[i % len(HR_CATEGORIES)] for i in range(total)]
