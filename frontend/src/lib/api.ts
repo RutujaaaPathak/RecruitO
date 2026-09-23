@@ -70,7 +70,9 @@ async function request<T>(
         : Array.isArray(detail)
         ? detail.map((d: { msg?: string }) => d.msg).filter(Boolean).join("; ")
         : data?.message || `Request failed (${res.status})`;
-    throw new Error(message);
+    const err = new Error(message) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
 
   return data as T;

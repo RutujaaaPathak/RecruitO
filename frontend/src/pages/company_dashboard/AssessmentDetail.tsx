@@ -12,6 +12,7 @@ import {
 import CompanyLayout from "./CompanyLayout";
 import AssessmentFormFields from "./AssessmentFormFields";
 import SectionQuestions from "./SectionQuestions";
+import AssignedCandidates from "./AssignedCandidates";
 import {
   AssessmentDetail as AssessmentDetailData,
   AssessmentFormState,
@@ -627,6 +628,12 @@ export default function AssessmentDetail() {
             </ul>
           )}
         </div>
+
+        {/* Assigned Candidates */}
+        <AssignedCandidates
+          assessmentId={assessment.id}
+          onChanged={() => loadAssessment(false)}
+        />
 
         {/* Add / Edit Section Modal */}
         {sectionModal && (
