@@ -63,6 +63,7 @@ def db():
         m.AssessmentAssignment.__table__,
         m.AssessmentQuestion.__table__,
         m.AssessmentAnswer.__table__,
+        m.Notification.__table__,
     ]
     m.Base.metadata.create_all(engine, tables=tables)
     s = Session(engine)

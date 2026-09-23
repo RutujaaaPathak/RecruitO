@@ -1243,6 +1243,22 @@ class AssessmentAnswerOut(BaseModel):
     updated_at: datetime
 
 
+class CandidateAssessmentAttemptOut(CandidateAssessmentStartOut):
+    """The candidate's own attempt content on re-entry: the full start
+    response (title/instructions/ordered sections + questions/duration/deadline)
+    plus the candidate's own saved answers.
+
+    ``answers`` are serialized exactly like the save endpoint (``_answer_out``):
+    candidate-safe only — never ``is_correct``, ``correct_index``, hidden-case
+    I/O or the stored ``code`` draft. An attempt that was never started is a 400
+    (call ``start`` first); an expired in-progress attempt is finalized before
+    reading (same auto-submit as the answer/submit paths).
+    """
+
+    answers: List[AssessmentAnswerOut] = []
+    submitted_at: Optional[datetime] = None
+
+
 class CandidateAssessmentSubmitOut(BaseModel):
     """The final state returned once an attempt is submitted (explicitly or
     by the deadline). ``answered_count`` is scoped to the candidate's own

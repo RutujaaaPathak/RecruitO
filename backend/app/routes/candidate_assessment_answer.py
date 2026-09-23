@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 from app.deps import get_db
 from app import models, schemas
 from app.routes.candidate_assessments import _my_assignment, candidate_only
-from app.routes.candidate_assessment_start import _deadline_at
+from app.routes.candidate_assessment_start import _deadline_at, _sections_out
 from app.services.code_executor import execute_code, validate_code
 from app.services.coding_tests import SUPPORTED_LANGUAGES, time_limit_seconds
+from app.services.notifications import create_notification
 
 router = APIRouter(
     prefix="/me/assessments", tags=["candidate-assessment-answers"]
@@ -84,6 +85,10 @@ def _finalize_if_expired(
         )
         .execution_options(synchronize_session=False)
     )
+    # The atomic transition above can win exactly once, so the company-facing
+    # auto-submit notification is created exactly once too (retries never
+    # duplicate it). Built and committed with the transition itself.
+    _notify_company_submission(db, assignment, auto=True)
     db.commit()
     db.refresh(assignment)
     return True
@@ -199,6 +204,114 @@ def _submit_out(
         status=assignment.status,
         submitted_at=assignment.submitted_at,
         answered_count=answered,
+    )
+
+
+def _notify_company_submission(
+    db: Session,
+    assignment: models.AssessmentAssignment,
+    *,
+    auto: bool,
+) -> None:
+    """Queue (without committing) the company-facing submission notification.
+
+    Called only by a request that actually performed the in_progress →
+    submitted transition (explicit submit or deadline auto-submit), which is
+    atomic and can win exactly once, so a retry or a concurrent request can
+    never create a duplicate. The recipient is the owning company's user (from
+    the assessment's company row — never from the client), so a notification
+    can never land in another company's inbox. The message carries only the
+    assessment title and candidate name: never answers, hidden cases, code or
+    scores.
+    """
+    company = assignment.assessment.company
+    if company is None:
+        return
+    candidate_name = assignment.candidate.name if assignment.candidate else None
+    display = candidate_name or "A candidate"
+    if auto:
+        title = "Assessment Auto-submitted"
+        message = (
+            f"{display}'s attempt at '{assignment.assessment.title}' was "
+            "auto-submitted after the deadline."
+        )
+    else:
+        title = "Assessment Submitted"
+        message = f"{display} submitted '{assignment.assessment.title}'."
+    create_notification(
+        db,
+        company.user_id,
+        type=models.NotificationType.assessment,
+        title=title,
+        message=message,
+        link=f"/company/assessments/{assignment.assessment_id}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Re-entry: the candidate's own attempt content + saved answers
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/{assessment_id}/attempt",
+    response_model=schemas.CandidateAssessmentAttemptOut,
+)
+def get_my_attempt(
+    assessment_id: int,
+    current_user: models.User = Depends(candidate_only),
+    db: Session = Depends(get_db),
+):
+    """Re-fetch the candidate's own attempt without re-starting the clock.
+
+    Frontend refresh / re-entry needs the full test content (sections +
+    questions) plus the candidate's own saved answers; ``start`` returns the
+    content only once (it 409s on an already-started attempt) and the answer
+    save endpoint persists one question at a time. This endpoint restores that
+    exact state from the backend.
+
+    An attempt that was never started is a 400 (candidates must ``start``
+    first). An expired in-progress attempt is finalized here — the same atomic
+    auto-submit used by the answer/submit paths — and returned as
+    ``submitted``. Everything is candidate-safe: only the candidate's own
+    answers (never ``is_correct``, ``correct_index``, hidden-case I/O or the
+    stored code draft) and never another candidate's data.
+    """
+    assignment = _my_assignment(db, current_user, assessment_id)
+    _finalize_if_expired(db, assignment)
+
+    if assignment.status == models.AssessmentAssignmentStatusEnum.assigned:
+        raise HTTPException(
+            status_code=400, detail="Assessment has not been started"
+        )
+
+    assessment = assignment.assessment
+    answer_rows = (
+        db.query(models.AssessmentAnswer, models.AssessmentQuestion)
+        .join(
+            models.AssessmentQuestion,
+            models.AssessmentAnswer.question_id == models.AssessmentQuestion.id,
+        )
+        .filter(models.AssessmentAnswer.assignment_id == assignment.id)
+        .all()
+    )
+    answers = [_answer_out(answer, question) for answer, question in answer_rows]
+
+    return schemas.CandidateAssessmentAttemptOut(
+        attempt_id=assignment.id,
+        assessment_id=assessment.id,
+        title=assessment.title,
+        description=assessment.description,
+        instructions=assessment.instructions,
+        company_name=assessment.company.name,
+        status=assignment.status,
+        duration_minutes=assessment.duration_minutes,
+        started_at=assignment.started_at,
+        deadline_at=_deadline_at(assessment, assignment.started_at),
+        starts_at=assessment.starts_at,
+        ends_at=assessment.ends_at,
+        sections=_sections_out(db, assessment.id),
+        answers=answers,
+        submitted_at=assignment.submitted_at,
     )
 
 
@@ -400,6 +513,10 @@ def submit_assessment(
             )
         return _submit_out(db, assignment)
 
+    # The atomic transition above can win exactly once, so the explicit-submit
+    # notification is created exactly once too (re-submits / retries never
+    # duplicate it). Built and committed with the transition itself.
+    _notify_company_submission(db, assignment, auto=False)
     db.commit()
     db.refresh(assignment)
     return _submit_out(db, assignment)
