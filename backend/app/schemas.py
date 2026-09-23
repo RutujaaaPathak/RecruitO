@@ -1255,6 +1255,93 @@ class CandidateAssessmentSubmitOut(BaseModel):
     answered_count: int = 0
 
 
+class AssessmentSectionResultOut(BaseModel):
+    """One section's performance inside a candidate attempt result.
+
+    Derived entirely from the persisted question bank and answer verdicts, so
+    the breakdown is deterministic and never mutates on read. ``percentage``
+    is 0 when the section has zero maximum marks — never a division.
+    """
+
+    section_id: int
+    section_type: AssessmentSectionTypeEnum
+    title: str
+    section_order: int
+    total_questions: int = 0
+    answered_questions: int = 0
+    total_score: int = 0
+    maximum_score: int = 0
+    percentage: int = 0
+
+
+class AssessmentQuestionResultOut(BaseModel):
+    """Question-level performance for the owning company's review.
+
+    Includes whether the answer was correct (MCQ: the persisted snapshot;
+    coding: all hidden cases passed) and the score earned. Deliberately never
+    carries hidden coding test cases or private execution I/O: coding verdicts
+    are aggregate only (status / passed / total / time), and neither
+    ``correct_index`` (MCQ) nor per-case ``results`` nor the answer key are
+    ever serialized here.
+    """
+
+    question_id: int
+    section_id: int
+    section_type: AssessmentSectionTypeEnum
+    section_title: str
+    question_order: int
+    question_type: AssessmentQuestionTypeEnum
+    question_text: str
+    title: Optional[str] = None
+    category: Optional[str] = None
+    answered: bool = False
+    selected_option: Optional[int] = None
+    correct: Optional[bool] = None
+    earned_score: int = 0
+    max_score: int = 0
+    percentage: int = 0
+    # Coding verdict (aggregate only — never per-case or hidden-case I/O).
+    status: Optional[str] = None
+    passed_cases: Optional[int] = None
+    total_cases: Optional[int] = None
+    execution_time_ms: Optional[int] = None
+    answered_at: Optional[datetime] = None
+
+
+class AssessmentResultOut(BaseModel):
+    """A candidate's submission result for one assessment (company view).
+
+    ``sections`` gives the section-wise performance; ``total_questions`` /
+    ``maximum_score`` cover every question of the assessment regardless of
+    whether it was answered, so an incomplete or expired attempt is reported
+    truthfully against the full paper. ``percentage`` is 0 when the
+    assessment has zero questions or zero maximum marks — never a division.
+    """
+
+    assignment_id: int
+    assessment_id: int
+    assessment_title: str
+    candidate_id: int
+    candidate_name: Optional[str] = None
+    candidate_email: Optional[str] = None
+    status: AssessmentAssignmentStatusEnum
+    assigned_at: datetime
+    started_at: Optional[datetime] = None
+    submitted_at: Optional[datetime] = None
+    total_questions: int = 0
+    answered_questions: int = 0
+    total_score: int = 0
+    maximum_score: int = 0
+    percentage: int = 0
+    sections: List[AssessmentSectionResultOut] = []
+
+
+class AssessmentResultDetailOut(AssessmentResultOut):
+    """Full per-question result for one candidate's attempt."""
+
+    questions: List[AssessmentQuestionResultOut] = []
+
+
 # ---------------------------------------------------------------------------
 # Question bank (company-only)
 # ---------------------------------------------------------------------------

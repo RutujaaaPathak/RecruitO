@@ -32,6 +32,7 @@ from app.routes import (
     candidate_assessment_start,
     candidate_assessment_answer,
     company_assessment_questions,
+    company_assessment_results,
 )
 
 from sqlalchemy import text
@@ -84,6 +85,7 @@ app.include_router(company_assessment_questions.router)
 app.include_router(candidate_assessments.router)
 app.include_router(candidate_assessment_start.router)
 app.include_router(candidate_assessment_answer.router)
+app.include_router(company_assessment_results.router)
 
 @app.get("/")
 def read_root():
