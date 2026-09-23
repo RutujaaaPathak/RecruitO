@@ -1,4 +1,5 @@
 import { api } from "./api";
+import type { AssessmentAssignmentStatus } from "./assignments";
 
 export type AssessmentStatus = "draft" | "published" | "closed";
 
@@ -336,5 +337,78 @@ export function reorderSections(
   return api.put<AssessmentSection[]>(
     `/assessments/${assessmentId}/sections/reorder`,
     { ordered_section_ids: orderedSectionIds }
+  );
+}
+
+export interface AssessmentSectionResult {
+  section_id: number;
+  section_type: AssessmentSectionType;
+  title: string;
+  section_order: number;
+  total_questions: number;
+  answered_questions: number;
+  total_score: number;
+  maximum_score: number;
+  percentage: number;
+}
+
+export interface AssessmentResult {
+  assignment_id: number;
+  assessment_id: number;
+  assessment_title: string;
+  candidate_id: number;
+  candidate_name: string | null;
+  candidate_email: string | null;
+  status: AssessmentAssignmentStatus;
+  assigned_at: string;
+  started_at: string | null;
+  submitted_at: string | null;
+  total_questions: number;
+  answered_questions: number;
+  total_score: number;
+  maximum_score: number;
+  percentage: number;
+  sections: AssessmentSectionResult[];
+}
+
+export interface AssessmentQuestionResult {
+  question_id: number;
+  section_id: number;
+  section_type: AssessmentSectionType;
+  section_title: string;
+  question_order: number;
+  question_type: "mcq" | "coding";
+  question_text: string;
+  title: string | null;
+  category: string | null;
+  answered: boolean;
+  selected_option: number | null;
+  correct: boolean | null;
+  earned_score: number;
+  max_score: number;
+  percentage: number;
+  status: string | null;
+  passed_cases: number | null;
+  total_cases: number | null;
+  execution_time_ms: number | null;
+  answered_at: string | null;
+}
+
+export interface AssessmentResultDetail extends AssessmentResult {
+  questions: AssessmentQuestionResult[];
+}
+
+export function listAssessmentResults(
+  assessmentId: number
+): Promise<AssessmentResult[]> {
+  return api.get<AssessmentResult[]>(`/assessments/${assessmentId}/results`);
+}
+
+export function getAssessmentResult(
+  assessmentId: number,
+  assignmentId: number
+): Promise<AssessmentResultDetail> {
+  return api.get<AssessmentResultDetail>(
+    `/assessments/${assessmentId}/results/${assignmentId}`
   );
 }
