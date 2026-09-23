@@ -7,6 +7,7 @@ import {
   Users,
   BarChart3,
   Video,
+  ClipboardList,
   Settings,
   LogOut,
 } from "lucide-react";
@@ -74,6 +75,13 @@ export default function Sidebar() {
           label="Interviews"
           active={location.pathname === "/company/interview"}
           onClick={() => navigate("/company/interview")}
+        />
+
+        <Item
+          icon={<ClipboardList size={18} />}
+          label="Assessments"
+          active={location.pathname.startsWith("/company/assessments")}
+          onClick={() => navigate("/company/assessments")}
         />
 
         <Item

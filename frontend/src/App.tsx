@@ -37,6 +37,10 @@ const JobDetail = lazy(() => import("./pages/company_dashboard/JobDetail"));
 const CompanyInterviews = lazy(() => import("./pages/company_dashboard/Interview"));
 const CompanySettings = lazy(() => import("./pages/company_dashboard/Settings_company"));
 const ApplicantDetail = lazy(() => import("./pages/company_dashboard/ApplicantDetail"));
+const Assessments = lazy(() => import("./pages/company_dashboard/Assessments"));
+const AssessmentDetail = lazy(
+  () => import("./pages/company_dashboard/AssessmentDetail")
+);
 
 const AdminHome = lazy(() => import("./pages/admin_dashboard/AdminHome"));
 const ManageUsers = lazy(() => import("./pages/admin_dashboard/ManageUsers"));
@@ -109,6 +113,11 @@ function App() {
             <Route path="/company/job-postings" element={<JobPostings />} />
             <Route path="/company/job-postings/:id" element={<JobDetail />} />
             <Route path="/company/interview" element={<CompanyInterviews />} />
+            <Route path="/company/assessments" element={<Assessments />} />
+            <Route
+              path="/company/assessments/:id"
+              element={<AssessmentDetail />}
+            />
             <Route path="/company/setting" element={<CompanySettings />} />
           </Route>
         </Route>
