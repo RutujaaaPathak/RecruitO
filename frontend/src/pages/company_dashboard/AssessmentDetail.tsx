@@ -11,6 +11,8 @@ import {
 } from "lucide-react";
 import CompanyLayout from "./CompanyLayout";
 import AssessmentFormFields from "./AssessmentFormFields";
+import SectionQuestions from "./SectionQuestions";
+import AssignedCandidates from "./AssignedCandidates";
 import {
   AssessmentDetail as AssessmentDetailData,
   AssessmentFormState,
@@ -88,6 +90,9 @@ export default function AssessmentDetail() {
   const [sectionBusy, setSectionBusy] = useState<boolean>(false);
   const [sectionToDelete, setSectionToDelete] =
     useState<AssessmentSection | null>(null);
+  const [expandedSectionId, setExpandedSectionId] = useState<number | null>(
+    null
+  );
 
   const [actionError, setActionError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -525,78 +530,110 @@ export default function AssessmentDetail() {
             </p>
           ) : (
             <ul>
-              {assessment.sections.map((section, index) => (
-                <li
-                  key={section.id}
-                  className="
-                    flex items-center gap-4 px-6 py-4
-                    border-t border-gray-200 dark:border-gray-800
-                    hover:bg-gray-50 dark:hover:bg-gray-800/50 transition
-                  "
-                >
-                  <span className="
-                    w-8 h-8 shrink-0 rounded-full
-                    bg-indigo-600/10 text-indigo-600 dark:text-indigo-400
-                    flex items-center justify-center text-sm font-semibold
-                  ">
-                    {section.section_order}
-                  </span>
+              {assessment.sections.map((section, index) => {
+                const expanded = expandedSectionId === section.id;
+                return (
+                  <li
+                    key={section.id}
+                    className="border-t border-gray-200 dark:border-gray-800"
+                  >
+                    <div className="flex items-center gap-4 px-6 py-4 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition">
+                      <span className="
+                        w-8 h-8 shrink-0 rounded-full
+                        bg-indigo-600/10 text-indigo-600 dark:text-indigo-400
+                        flex items-center justify-center text-sm font-semibold
+                      ">
+                        {section.section_order}
+                      </span>
 
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-gray-900 dark:text-white">
-                      {section.title}
-                    </p>
-                    <p className="text-xs text-gray-500 dark:text-gray-400">
-                      {SECTION_TYPE_LABELS[section.section_type]}
-                      {section.marks != null && ` • ${section.marks} marks`}
-                    </p>
-                  </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-gray-900 dark:text-white">
+                          {section.title}
+                        </p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                          {SECTION_TYPE_LABELS[section.section_type]}
+                          {section.marks != null && ` • ${section.marks} marks`}
+                        </p>
+                      </div>
 
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => handleMove(index, -1)}
-                      disabled={sectionBusy || index === 0}
-                      aria-label="Move section up"
-                      className={iconButtonClass}
-                    >
-                      <ChevronUp size={16} />
-                    </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() =>
+                            setExpandedSectionId(expanded ? null : section.id)
+                          }
+                          disabled={sectionBusy}
+                          aria-label={expanded ? "Hide questions" : "Show questions"}
+                          className={iconButtonClass}
+                        >
+                          <ChevronDown
+                            size={16}
+                            className={`transition-transform ${
+                              expanded ? "rotate-180" : ""
+                            }`}
+                          />
+                        </button>
 
-                    <button
-                      onClick={() => handleMove(index, 1)}
-                      disabled={
-                        sectionBusy ||
-                        index === assessment.sections.length - 1
-                      }
-                      aria-label="Move section down"
-                      className={iconButtonClass}
-                    >
-                      <ChevronDown size={16} />
-                    </button>
+                        <button
+                          onClick={() => handleMove(index, -1)}
+                          disabled={sectionBusy || index === 0}
+                          aria-label="Move section up"
+                          className={iconButtonClass}
+                        >
+                          <ChevronUp size={16} />
+                        </button>
 
-                    <button
-                      onClick={() => openEditSection(section)}
-                      disabled={sectionBusy}
-                      aria-label="Edit section"
-                      className={iconButtonClass}
-                    >
-                      <Pencil size={16} />
-                    </button>
+                        <button
+                          onClick={() => handleMove(index, 1)}
+                          disabled={
+                            sectionBusy ||
+                            index === assessment.sections.length - 1
+                          }
+                          aria-label="Move section down"
+                          className={iconButtonClass}
+                        >
+                          <ChevronDown size={16} />
+                        </button>
 
-                    <button
-                      onClick={() => setSectionToDelete(section)}
-                      disabled={sectionBusy}
-                      aria-label="Delete section"
-                      className={iconButtonClass}
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
-                </li>
-              ))}
+                        <button
+                          onClick={() => openEditSection(section)}
+                          disabled={sectionBusy}
+                          aria-label="Edit section"
+                          className={iconButtonClass}
+                        >
+                          <Pencil size={16} />
+                        </button>
+
+                        <button
+                          onClick={() => setSectionToDelete(section)}
+                          disabled={sectionBusy}
+                          aria-label="Delete section"
+                          className={iconButtonClass}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    </div>
+
+                    {expanded && (
+                      <div className="border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/60 px-6 py-5">
+                        <SectionQuestions
+                          assessmentId={assessment.id}
+                          section={section}
+                        />
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
+
+        {/* Assigned Candidates */}
+        <AssignedCandidates
+          assessmentId={assessment.id}
+          onChanged={() => loadAssessment(false)}
+        />
 
         {/* Add / Edit Section Modal */}
         {sectionModal && (
