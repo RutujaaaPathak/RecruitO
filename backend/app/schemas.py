@@ -1,6 +1,6 @@
 # pyrefly: ignore [missing-import]
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List, Literal
+from pydantic import BaseModel, EmailStr, Field, model_validator
+from typing import Optional, List, Literal, Dict, Any
 from datetime import datetime, date
 
 from app.models import (
@@ -12,7 +12,12 @@ from app.models import (
     AssessmentStatusEnum,
     CodingTestStatusEnum,
     NotificationType,
+    CompanyAssessmentStatusEnum,
+    AssessmentSectionTypeEnum,
+    AssessmentAssignmentStatusEnum,
+    AssessmentQuestionTypeEnum,
 )
+from app.services.coding_tests import SUPPORTED_LANGUAGES
 
 
 # -----------------------------
@@ -854,3 +859,597 @@ class NotificationOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# -----------------------------
+# Company Assessments (recruitment pipeline)
+# -----------------------------
+class AssessmentAssignmentCreate(BaseModel):
+    """Hand a published assessment to a candidate.
+
+    ``candidate_id`` is the candidate *user* who must take the assessment. The
+    shared (assessment_id, candidate_id) unique constraint guarantees the same
+    assessment can never be assigned to the same candidate twice, even under
+    concurrent requests.
+    """
+
+    assessment_id: int
+    candidate_id: int
+
+
+class AssessmentSectionOut(BaseModel):
+    """A serialized section of an assessment (Out contract).
+
+    ``settings`` is opaque JSON (per-section parameters the fulfillment engine
+    will interpret); no engine-specific fields leak into this contract.
+    """
+
+    id: int
+    assessment_id: int
+    section_type: AssessmentSectionTypeEnum
+    title: str
+    section_order: int
+    marks: Optional[int] = None
+    settings: Optional[dict] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AssessmentAssignmentOut(BaseModel):
+    """A serialized assignment of an assessment to a candidate (Out contract)."""
+
+    id: int
+    assessment_id: int
+    candidate_id: int
+    status: AssessmentAssignmentStatusEnum
+    assigned_at: datetime
+    started_at: Optional[datetime] = None
+    submitted_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AssessmentOut(BaseModel):
+    """A serialized company assessment (Out contract; list/detail base)."""
+
+    id: int
+    company_id: int
+    title: str
+    description: Optional[str] = None
+    instructions: Optional[str] = None
+    status: CompanyAssessmentStatusEnum
+    duration_minutes: Optional[int] = None
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AssessmentDetailOut(AssessmentOut):
+    """Full assessment detail: its ordered sections + outstanding assignments."""
+
+    sections: List[AssessmentSectionOut] = []
+    assignments: List[AssessmentAssignmentOut] = []
+
+
+class AssessmentCreate(BaseModel):
+    """Create a company assessment (catalog entry — no sections/assignments yet).
+
+    ``status`` defaults to draft. ``duration_minutes`` must be positive and,
+    when both ``starts_at`` and ``ends_at`` are supplied, the validity window
+    must be ordered (ends_at on or after starts_at).
+    """
+
+    title: str
+    description: Optional[str] = None
+    instructions: Optional[str] = None
+    status: Optional[CompanyAssessmentStatusEnum] = CompanyAssessmentStatusEnum.draft
+    duration_minutes: Optional[int] = Field(default=None, ge=1)
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def _validate_validity_window(self):
+        if (
+            self.ends_at is not None
+            and self.starts_at is not None
+            and self.ends_at < self.starts_at
+        ):
+            raise ValueError("ends_at must be on or after starts_at")
+        return self
+
+
+class AssessmentUpdate(BaseModel):
+    """Update an assessment. All fields optional (partial update)."""
+
+    title: Optional[str] = None
+    description: Optional[str] = None
+    instructions: Optional[str] = None
+    status: Optional[CompanyAssessmentStatusEnum] = None
+    duration_minutes: Optional[int] = Field(default=None, ge=1)
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def _validate_validity_window(self):
+        if (
+            self.ends_at is not None
+            and self.starts_at is not None
+            and self.ends_at < self.starts_at
+        ):
+            raise ValueError("ends_at must be on or after starts_at")
+        return self
+
+
+class AssessmentSectionCreate(BaseModel):
+    """Add a section to an assessment.
+
+    ``section_type`` is validated against the existing enum. ``section_order``
+    is optional — when omitted the route appends the section at the end.
+    """
+
+    section_type: AssessmentSectionTypeEnum
+    title: str
+    section_order: Optional[int] = Field(default=None, ge=1)
+    marks: Optional[int] = Field(default=None, ge=0)
+    settings: Optional[dict] = None
+
+
+class AssessmentSectionUpdate(BaseModel):
+    """Update a section. All fields optional (partial update)."""
+
+    section_type: Optional[AssessmentSectionTypeEnum] = None
+    title: Optional[str] = None
+    section_order: Optional[int] = Field(default=None, ge=1)
+    marks: Optional[int] = Field(default=None, ge=0)
+    settings: Optional[dict] = None
+
+
+class AssessmentSectionReorderIn(BaseModel):
+    """Reorder the sections of an assessment: section ids in their new order.
+
+    Every section of the assessment must appear exactly once; duplicate ids
+    are rejected here.
+    """
+
+    ordered_section_ids: List[int]
+
+    @model_validator(mode="after")
+    def _reject_duplicate_ids(self):
+        if len(self.ordered_section_ids) != len(set(self.ordered_section_ids)):
+            raise ValueError("ordered_section_ids must not contain duplicates")
+        return self
+
+
+class AssessmentAssignIn(BaseModel):
+    """Assign one or more candidate users to an assessment.
+
+    The assessment is identified by URL; only candidate *user* ids are listed.
+    An empty list or duplicated ids is rejected up front so a bulk request is
+    validated completely before anything is written.
+    """
+
+    candidate_ids: List[int]
+
+    @model_validator(mode="after")
+    def _reject_empty_and_duplicate_ids(self):
+        if not self.candidate_ids:
+            raise ValueError("candidate_ids must not be empty")
+        if len(self.candidate_ids) != len(set(self.candidate_ids)):
+            raise ValueError("candidate_ids must not contain duplicates")
+        return self
+
+
+class AssessmentAssignmentDetailOut(BaseModel):
+    """A serialized assignment enriched with candidate identity + assessment.
+
+    Used by the company-facing assignment endpoints (assign / list / detail)
+    so the company sees who was assigned what, when, and in which state,
+    alongside the raw assignment timestamps.
+    """
+
+    id: int
+    assessment_id: int
+    candidate_id: int
+    status: AssessmentAssignmentStatusEnum
+    assigned_at: datetime
+    started_at: Optional[datetime] = None
+    submitted_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+    candidate_name: Optional[str] = None
+    candidate_email: Optional[str] = None
+    assessment_title: Optional[str] = None
+
+
+class CandidateAssessmentSectionOut(BaseModel):
+    """A candidate-facing section of an assessment: the ordered stage list.
+
+    Deliberately omits per-section ``marks`` and opaque engine ``settings``
+    (JSON) — both are scoring/engine configuration that stays private until a
+    section fulfilment engine is attached.
+    """
+
+    id: int
+    section_type: AssessmentSectionTypeEnum
+    title: str
+    section_order: int
+
+
+class CandidateAssessmentAssignmentOut(BaseModel):
+    """One of the candidate's assigned assessments (list / status contract).
+
+    Melds the assessment's candidate-visible details (title, description,
+    instructions, company name, duration, scheduled window) with the
+    candidate's own assignment state and timestamps. No company/admin
+    internals (assessment lifecycle status, company id), no scoring
+    configuration, and nothing belonging to other candidates.
+    """
+
+    id: int
+    assessment_id: int
+    title: str
+    description: Optional[str] = None
+    instructions: Optional[str] = None
+    company_name: str
+    duration_minutes: Optional[int] = None
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+    status: AssessmentAssignmentStatusEnum
+    assigned_at: datetime
+    started_at: Optional[datetime] = None
+    submitted_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CandidateAssessmentAssignmentDetailOut(CandidateAssessmentAssignmentOut):
+    """Full candidate-facing detail: the list contract plus the ordered
+    sections of the assessment."""
+
+    sections: List[CandidateAssessmentSectionOut] = []
+
+
+class CandidateAssessmentQuestionOut(BaseModel):
+    """A candidate-safe question rendered inside a started attempt.
+
+    Deliberately omits the private evaluation data stored on the question bank:
+    no ``correct_index`` (MCQ), no ``hidden_cases`` (coding), no ``marks`` or
+    ``explanation`` (scoring/answer-revealing configuration). Sample cases are
+    shown (they are the public examples), exactly like the existing coding
+    engine does. ``question_text`` carries the statement for both types.
+    """
+
+    id: int
+    question_type: AssessmentQuestionTypeEnum
+    question_text: str
+    question_order: int
+
+    # MCQ (candidate-visible subset).
+    options: Optional[List[str]] = None
+
+    # Coding (candidate-visible subset).
+    title: Optional[str] = None
+    category: Optional[str] = None
+    difficulty: Optional[str] = None
+    input_format: Optional[str] = None
+    output_format: Optional[str] = None
+    constraints: Optional[str] = None
+    sample_cases: Optional[List[Dict[str, Any]]] = None
+    time_limit_seconds: Optional[int] = None
+    supported_languages: Optional[List[str]] = None
+
+
+class CandidateAssessmentSectionDetailOut(BaseModel):
+    """A candidate-facing section of a started attempt: the ordered stage list
+    plus its questions in their configured order."""
+
+    id: int
+    section_type: AssessmentSectionTypeEnum
+    title: str
+    section_order: int
+    questions: List[CandidateAssessmentQuestionOut] = []
+
+
+class CandidateAssessmentStartOut(BaseModel):
+    """The full candidate-facing content returned when an assessment starts.
+
+    `attempt_id` is the assignment id: the existing ``assessment_assignments``
+    row is the attempt/session container (status + started_at/submitted_at), so
+    no separate attempt table is created. Includes everything the frontend
+    needs to render the test: title/instructions, ordered sections + questions,
+    duration, and start/deadline information (``started_at``, ``deadline_at`` =
+    the earlier of window end and start+duration).
+    """
+
+    attempt_id: int
+    assessment_id: int
+    title: str
+    description: Optional[str] = None
+    instructions: Optional[str] = None
+    company_name: str
+    status: AssessmentAssignmentStatusEnum
+    duration_minutes: Optional[int] = None
+    started_at: datetime
+    deadline_at: Optional[datetime] = None
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+    sections: List[CandidateAssessmentSectionDetailOut] = []
+
+
+class AssessmentAnswerSaveIn(BaseModel):
+    """Save/update the candidate's answer to one question of an attempt.
+
+    Exactly one answer mode must be supplied:
+    - MCQ/aptitude/technical questions: ``selected_option`` (0-based index).
+    - Coding questions: ``language`` + ``code`` (graded server-side in the
+      Docker sandbox). The correct answer is NEVER accepted from the client —
+      correctness is computed server-side from the stored question.
+    """
+
+    question_id: int
+    selected_option: Optional[int] = Field(default=None, ge=0)
+    language: Optional[Literal["python", "java", "cpp"]] = None
+    code: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_answer_mode(self):
+        has_mcq = self.selected_option is not None
+        has_coding = self.language is not None or self.code is not None
+        if has_mcq and has_coding:
+            raise ValueError(
+                "Provide either selected_option or code+language, not both"
+            )
+        if not has_mcq and not has_coding:
+            raise ValueError("Provide selected_option or code+language")
+        if has_coding:
+            if self.language is None or self.code is None:
+                raise ValueError("Coding answers require both language and code")
+            if not self.code.strip():
+                raise ValueError("Code cannot be empty")
+        return self
+
+
+class AssessmentAnswerOut(BaseModel):
+    """The candidate's own saved answer (candidate-safe).
+
+    Deliberately omits every piece of private evaluation data: no
+    ``is_correct`` or ``correct_index`` (MCQ), no ``hidden_cases`` / expected
+    outputs. For coding, per-case ``results`` carry only case index / passed /
+    status / time — like the existing coding module, never the hidden-case I/O.
+    """
+
+    question_id: int
+    question_type: AssessmentQuestionTypeEnum
+    selected_option: Optional[int] = None
+    # Coding verdict (passed | failed | error).
+    language: Optional[str] = None
+    status: Optional[str] = None
+    passed_cases: Optional[int] = None
+    total_cases: Optional[int] = None
+    score: Optional[int] = None
+    execution_time_ms: Optional[int] = None
+    error_message: Optional[str] = None
+    results: List[CodingTestCaseResultOut] = []
+    created_at: datetime
+    updated_at: datetime
+
+
+class CandidateAssessmentSubmitOut(BaseModel):
+    """The final state returned once an attempt is submitted (explicitly or
+    by the deadline). ``answered_count`` is scoped to the candidate's own
+    attempt."""
+
+    attempt_id: int
+    assessment_id: int
+    status: AssessmentAssignmentStatusEnum
+    submitted_at: Optional[datetime] = None
+    answered_count: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Question bank (company-only)
+# ---------------------------------------------------------------------------
+def validate_test_cases(
+    cases: Optional[List[Dict[str, Any]]], label: str
+) -> None:
+    """Validate a coding test-case list: each entry is ``{"input", "expected"}``
+    with string values, matching the contract consumed by ``code_executor``."""
+    if not isinstance(cases, list) or not cases:
+        raise ValueError(f"{label} must be a non-empty list")
+    for i, case in enumerate(cases):
+        if not isinstance(case, dict) or set(case.keys()) != {"input", "expected"}:
+            raise ValueError(
+                f"{label}[{i}] must be a dict with exactly 'input' and 'expected'"
+            )
+        if not isinstance(case.get("input"), str) or not isinstance(
+            case.get("expected"), str
+        ):
+            raise ValueError(f"{label}[{i}] 'input' and 'expected' must be strings")
+
+
+def validate_mcq_contract(
+    options: Optional[List[str]], correct_index: Optional[int]
+) -> None:
+    """Validate the MCQ question contract (2+ options, in-range correct index)."""
+    if not options or len(options) < 2:
+        raise ValueError("MCQ questions require at least 2 options")
+    if any(not isinstance(o, str) or not o.strip() for o in options):
+        raise ValueError("options must be non-empty strings")
+    if correct_index is None:
+        raise ValueError("MCQ questions require correct_index")
+    if not 0 <= correct_index < len(options):
+        raise ValueError("correct_index must point to one of the options")
+
+
+def validate_coding_contract(
+    hidden_cases: Optional[List[Dict[str, Any]]],
+    sample_cases: Optional[List[Dict[str, Any]]],
+    time_limit_seconds: Optional[int],
+    supported_languages: Optional[List[str]],
+) -> None:
+    """Validate the coding question contract (hidden grading cases, and
+    optional sample cases / languages) against the existing coding engine."""
+    validate_test_cases(hidden_cases, "hidden_cases")
+    if sample_cases is not None:
+        validate_test_cases(sample_cases, "sample_cases")
+    if time_limit_seconds is not None and time_limit_seconds < 1:
+        raise ValueError("time_limit_seconds must be positive")
+    if supported_languages is not None:
+        if not supported_languages or not all(
+            lang in SUPPORTED_LANGUAGES for lang in supported_languages
+        ):
+            raise ValueError(
+                f"supported_languages must be a subset of {SUPPORTED_LANGUAGES}"
+            )
+
+
+def validate_question_contract(
+    question_type: AssessmentQuestionTypeEnum,
+    options: Optional[List[str]] = None,
+    correct_index: Optional[int] = None,
+    hidden_cases: Optional[List[Dict[str, Any]]] = None,
+    sample_cases: Optional[List[Dict[str, Any]]] = None,
+    time_limit_seconds: Optional[int] = None,
+    supported_languages: Optional[List[str]] = None,
+) -> None:
+    """Dispatch contract validation by question type (shared by the create
+    schema and the update route's final-state check)."""
+    if question_type == AssessmentQuestionTypeEnum.mcq:
+        validate_mcq_contract(options, correct_index)
+    else:
+        validate_coding_contract(
+            hidden_cases,
+            sample_cases,
+            time_limit_seconds,
+            supported_languages,
+        )
+
+
+class AssessmentQuestionOut(BaseModel):
+    """A serialized company question-bank entry (company/admin view only).
+
+    Includes the private evaluation data (``correct_index``,
+    ``hidden_cases``) — this contract is never used by a candidate-facing
+    endpoint.
+    """
+
+    id: int
+    section_id: int
+    question_type: AssessmentQuestionTypeEnum
+    question_text: str
+    question_order: int
+
+    options: Optional[List[str]] = None
+    correct_index: Optional[int] = None
+    marks: Optional[int] = None
+    explanation: Optional[str] = None
+
+    title: Optional[str] = None
+    category: Optional[str] = None
+    difficulty: Optional[str] = None
+    input_format: Optional[str] = None
+    output_format: Optional[str] = None
+    constraints: Optional[str] = None
+    sample_cases: Optional[List[Dict[str, Any]]] = None
+    hidden_cases: Optional[List[Dict[str, Any]]] = None
+    time_limit_seconds: Optional[int] = None
+    supported_languages: Optional[List[str]] = None
+
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AssessmentQuestionCreate(BaseModel):
+    """Create a question in an assessment section (question bank).
+
+    ``question_type`` must match the section type (the route enforces that);
+    MCQ fields (``options`` + ``correct_index``) and coding fields reuse the
+    existing engines' contracts. Coding defaults mirror the coding engine:
+    a 5-second per-case time limit and python/java/cpp.
+    """
+
+    question_type: AssessmentQuestionTypeEnum
+    question_text: str
+    question_order: Optional[int] = Field(default=None, ge=1)
+
+    options: Optional[List[str]] = None
+    correct_index: Optional[int] = Field(default=None, ge=0)
+    marks: Optional[int] = Field(default=None, ge=0)
+    explanation: Optional[str] = None
+
+    title: Optional[str] = None
+    category: Optional[str] = None
+    difficulty: Optional[str] = None
+    input_format: Optional[str] = None
+    output_format: Optional[str] = None
+    constraints: Optional[str] = None
+    sample_cases: Optional[List[Dict[str, Any]]] = None
+    hidden_cases: Optional[List[Dict[str, Any]]] = None
+    time_limit_seconds: Optional[int] = Field(default=None, ge=1)
+    supported_languages: Optional[List[str]] = None
+
+    @model_validator(mode="after")
+    def _validate_question(self):
+        validate_question_contract(
+            self.question_type,
+            options=self.options,
+            correct_index=self.correct_index,
+            hidden_cases=self.hidden_cases,
+            sample_cases=self.sample_cases,
+            time_limit_seconds=self.time_limit_seconds,
+            supported_languages=self.supported_languages,
+        )
+        return self
+
+
+class AssessmentQuestionUpdate(BaseModel):
+    """Update a question-bank entry. All fields optional (partial update);
+    the final row is re-validated against its question type by the route."""
+
+    question_type: Optional[AssessmentQuestionTypeEnum] = None
+    question_text: Optional[str] = None
+    question_order: Optional[int] = Field(default=None, ge=1)
+
+    options: Optional[List[str]] = None
+    correct_index: Optional[int] = Field(default=None, ge=0)
+    marks: Optional[int] = Field(default=None, ge=0)
+    explanation: Optional[str] = None
+
+    title: Optional[str] = None
+    category: Optional[str] = None
+    difficulty: Optional[str] = None
+    input_format: Optional[str] = None
+    output_format: Optional[str] = None
+    constraints: Optional[str] = None
+    sample_cases: Optional[List[Dict[str, Any]]] = None
+    hidden_cases: Optional[List[Dict[str, Any]]] = None
+    time_limit_seconds: Optional[int] = Field(default=None, ge=1)
+    supported_languages: Optional[List[str]] = None
+
+
+class AssessmentQuestionReorderIn(BaseModel):
+    """Reorder the questions of a section: question ids in their new order.
+
+    Every question of the section must appear exactly once; duplicate ids
+    are rejected here.
+    """
+
+    ordered_question_ids: List[int]
+
+    @model_validator(mode="after")
+    def _reject_duplicate_ids(self):
+        if len(self.ordered_question_ids) != len(set(self.ordered_question_ids)):
+            raise ValueError("ordered_question_ids must not contain duplicates")
+        return self

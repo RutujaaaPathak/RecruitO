@@ -27,6 +27,11 @@ from app.routes import (
     aptitude_tests,
     video_interviews,
     notifications,
+    company_assessments,
+    candidate_assessments,
+    candidate_assessment_start,
+    candidate_assessment_answer,
+    company_assessment_questions,
 )
 
 from sqlalchemy import text
@@ -74,6 +79,11 @@ app.include_router(aptitude_tests.router)
 app.include_router(video_interviews.router)
 app.include_router(admin.router)
 app.include_router(notifications.router)
+app.include_router(company_assessments.router)
+app.include_router(company_assessment_questions.router)
+app.include_router(candidate_assessments.router)
+app.include_router(candidate_assessment_start.router)
+app.include_router(candidate_assessment_answer.router)
 
 @app.get("/")
 def read_root():

@@ -56,6 +56,50 @@ class InterviewStatusEnum(str, enum.Enum):
     cancelled = "cancelled"
 
 
+class CompanyAssessmentStatusEnum(str, enum.Enum):
+    """Lifecycle of a company-authored assessment (draft → published → closed)."""
+
+    draft = "draft"
+    published = "published"
+    closed = "closed"
+
+
+class AssessmentSectionTypeEnum(str, enum.Enum):
+    """Type of a section inside a company assessment.
+
+    Mirrors the candidate-side engines (aptitude / coding / technical video
+    interview / HR) so each section can later be wired to the matching engine
+    without coupling the assessment model to them.
+    """
+
+    aptitude = "aptitude"
+    technical = "technical"
+    coding = "coding"
+    hr = "hr"
+    technical_interview = "technical_interview"
+
+
+class AssessmentAssignmentStatusEnum(str, enum.Enum):
+    """Lifecycle of a company assessment assigned to a candidate."""
+
+    assigned = "assigned"
+    in_progress = "in_progress"
+    submitted = "submitted"
+
+
+class AssessmentQuestionTypeEnum(str, enum.Enum):
+    """Fulfilment type of a company-assessment question (engine discriminator).
+
+    Mirrors the fields of the existing candidate engines: MCQ covers aptitude
+    and technical sections, coding covers programming sections. HR and
+    technical-interview sections are interview-based and have no question
+    bank entries yet.
+    """
+
+    mcq = "mcq"
+    coding = "coding"
+
+
 # -----------------------------
 # User Table
 # -----------------------------
@@ -112,6 +156,9 @@ class User(Base):
     video_interviews = relationship(
         "VideoInterview", back_populates="user", cascade="all, delete-orphan"
     )
+    assessment_assignments = relationship(
+        "AssessmentAssignment", back_populates="candidate", cascade="all, delete-orphan"
+    )
 
     notifications = relationship(
         "Notification", back_populates="user", cascade="all, delete-orphan"
@@ -143,6 +190,9 @@ class Company(Base):
     user = relationship("User", back_populates="company")
     jobs = relationship(
         "Job", back_populates="company", cascade="all, delete-orphan"
+    )
+    assessments = relationship(
+        "Assessment", back_populates="company", cascade="all, delete-orphan"
     )
 
 
@@ -1050,3 +1100,309 @@ class Notification(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     user = relationship("User", back_populates="notifications")
+
+
+# -----------------------------
+# Company Assessments (recruitment pipeline)
+# -----------------------------
+class Assessment(Base):
+    """A company-authored assessment for screening candidates.
+
+    This is the *catalog* / assignment layer of the recruitment pipeline. A
+    company publishes an assessment (title, instructions, validity window,
+    total duration) made of ordered sections (aptitude / technical / coding /
+    HR / technical interview) and then assigns it to candidate users. It is
+    deliberately kept separate from the Mock Practice subsystem (aptitude /
+    coding / video interview): there is no question bank, attempt, answer,
+    scoring or report here — sections simply *reference* a section type that a
+    future engine can fulfil.
+
+    Lifecycle/status is company-facing (draft → published → closed) and lives
+    in its own enum intentionally: it is not the candidate-facing
+    ``AssessmentStatusEnum`` (in_progress/completed) reused by video
+    interviews and mcq/video mock practice.
+    """
+
+    __tablename__ = "assessments"
+    __table_args__ = (
+        # Fast per-company listing + draft/active counting, plus a cheap
+        # status-filtered scan inside one company.
+        Index(
+            "ix_assessments_company_status", "company_id", "status"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(
+        Integer, ForeignKey("companies.id"), nullable=False, index=True
+    )
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    instructions = Column(Text, nullable=True)
+    status = Column(
+        Enum(CompanyAssessmentStatusEnum, name="companyassessmentstatusenum"),
+        default=CompanyAssessmentStatusEnum.draft,
+        nullable=False,
+    )
+    duration_minutes = Column(Integer, nullable=True)
+    starts_at = Column(DateTime, nullable=True)
+    ends_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    company = relationship("Company", back_populates="assessments")
+    sections = relationship(
+        "AssessmentSection",
+        back_populates="assessment",
+        cascade="all, delete-orphan",
+        order_by="AssessmentSection.section_order",
+    )
+    assignments = relationship(
+        "AssessmentAssignment",
+        back_populates="assessment",
+        cascade="all, delete-orphan",
+    )
+
+
+class AssessmentSection(Base):
+    """One ordered section of a company assessment.
+
+    A section *describes* a stage of the assessment (aptitude, technical,
+    coding, HR, or technical interview) together with its ordinal position and,
+    optionally, the marks it carries and per-section JSON settings. ``section_type``
+    is a discriminator only — no questions/attempts/answers live here; a future
+    engine keyed on the section type owns those. ``section_order`` is unique per
+    assessment (`uq_assessment_section_order`) so sections cannot collide on
+    position.
+    """
+
+    __tablename__ = "assessment_sections"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_id", "section_order", name="uq_assessment_section_order"
+        ),
+        # Ordered section scan for one assessment.
+        Index(
+            "ix_assessment_sections_assessment_order",
+            "assessment_id",
+            "section_order",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    assessment_id = Column(
+        Integer, ForeignKey("assessments.id"), nullable=False, index=True
+    )
+    section_type = Column(
+        Enum(AssessmentSectionTypeEnum, name="assessmentsectiontypeenum"),
+        nullable=False,
+    )
+    title = Column(String, nullable=False)
+    section_order = Column(Integer, nullable=False)
+    marks = Column(Integer, nullable=True)
+    settings = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    assessment = relationship("Assessment", back_populates="sections")
+    questions = relationship(
+        "AssessmentQuestion",
+        back_populates="section",
+        cascade="all, delete-orphan",
+        order_by="AssessmentQuestion.question_order",
+    )
+
+
+class AssessmentAssignment(Base):
+    """Assignment of a published company assessment to a candidate user.
+
+    ``(assessment_id, candidate_id)`` is unique (`uq_assessment_assignment_candidate`)
+    so the same assessment can never be handed to the same candidate twice —
+    duplicate assignments are rejected at the database level. Status is
+    candidate-facing across the assignment lifecycle (assigned → in_progress →
+    submitted); ``submitted`` captures completion without borrowing the
+    in_progress/completed semantics of the shared attempt-status enum.
+    """
+
+    __tablename__ = "assessment_assignments"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_id",
+            "candidate_id",
+            name="uq_assessment_assignment_candidate",
+        ),
+        # Per-candidate inbox scan + per-candidate status filter.
+        Index(
+            "ix_assessment_assignments_candidate_status",
+            "candidate_id",
+            "status",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    assessment_id = Column(
+        Integer, ForeignKey("assessments.id"), nullable=False, index=True
+    )
+    candidate_id = Column(
+        Integer, ForeignKey("users.id"), nullable=False, index=True
+    )
+    status = Column(
+        Enum(AssessmentAssignmentStatusEnum, name="assessmentassignmentstatusenum"),
+        default=AssessmentAssignmentStatusEnum.assigned,
+        nullable=False,
+    )
+    assigned_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    submitted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    assessment = relationship("Assessment", back_populates="assignments")
+    candidate = relationship("User", back_populates="assessment_assignments")
+    answers = relationship(
+        "AssessmentAnswer",
+        back_populates="assignment",
+        cascade="all, delete-orphan",
+    )
+
+
+class AssessmentAnswer(Base):
+    """The candidate's latest answer to one question of one assessment attempt.
+
+    The attempt is the ``AssessmentAssignment`` row itself: an answer always
+    belongs to exactly one (assignment, question) pair, and the pair is unique
+    (`uq_assessment_answer_question`) so saving is an upsert — a second save for
+    the same question overwrites the latest answer, never a duplicate row.
+
+    ``question_type`` discriminates which side of the row is used: MCQ answers
+    set ``selected_option`` (+ the server-computed ``is_correct`` snapshot,
+    never serialized); coding answers set ``language``/``code`` plus the grading
+    verdict from the shared Docker sandbox (``status``/``passed_cases``/...
+    and per-case ``results`` carrying only case index/pass/status/time — never
+    hidden-case I/O or expected output).
+    """
+
+    __tablename__ = "assessment_answers"
+    __table_args__ = (
+        # One latest answer per (attempt, question) — idempotent upsert.
+        UniqueConstraint(
+            "assignment_id", "question_id", name="uq_assessment_answer_question"
+        ),
+        # This-attempt scan + guard against cross-assessment answers.
+        Index(
+            "ix_assessment_answers_assignment_question",
+            "assignment_id",
+            "question_id",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    assignment_id = Column(
+        Integer,
+        ForeignKey("assessment_assignments.id"),
+        nullable=False,
+        index=True,
+    )
+    question_id = Column(
+        Integer,
+        ForeignKey("assessment_questions.id"),
+        nullable=False,
+        index=True,
+    )
+
+    # MCQ answer (server-side only: correctness is never serialized).
+    selected_option = Column(Integer, nullable=True)  # 0-based option index
+    is_correct = Column(Boolean, nullable=True)  # snapshot at answer time
+
+    # Coding answer + grading verdict (from the Docker sandbox).
+    language = Column(String, nullable=True)  # python | java | cpp
+    code = Column(Text, nullable=True)
+    status = Column(String, nullable=True)  # passed | failed | error
+    passed_cases = Column(Integer, nullable=True)
+    total_cases = Column(Integer, nullable=True)
+    score = Column(Integer, nullable=True)  # 0-100
+    execution_time_ms = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    results = Column(JSON, nullable=True)  # [{case_index, passed, status, time_ms}]
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    assignment = relationship("AssessmentAssignment", back_populates="answers")
+    question = relationship("AssessmentQuestion", back_populates="answers")
+
+
+class AssessmentQuestion(Base):
+    """One company-authored question belonging to an assessment section.
+
+    ``question_type`` discriminates the fulfilment engine (mirroring the
+    section types): MCQ questions carry ``options`` + ``correct_index`` (the
+    single correct option — server-side only, never serialized to candidates)
+    exactly like ``McqQuestion``; coding questions carry the same contracts as
+    ``CodingProblem`` (``sample_cases`` shown to candidates, ``hidden_cases``
+    grading tests used only server-side). ``description``-style statements map
+    to the shared ``question_text`` column.
+
+    ``(section_id, question_order)`` is unique so questions cannot collide on
+    position. This is the *bank* layer — answers, submissions and scoring
+    deliberately live elsewhere.
+    """
+
+    __tablename__ = "assessment_questions"
+    __table_args__ = (
+        # Fast ordered scan inside one section + order-collision guard.
+        UniqueConstraint(
+            "section_id", "question_order", name="uq_assessment_question_order"
+        ),
+        Index(
+            "ix_assessment_questions_section_order",
+            "section_id",
+            "question_order",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    section_id = Column(
+        Integer, ForeignKey("assessment_sections.id"), nullable=False, index=True
+    )
+    question_type = Column(
+        Enum(AssessmentQuestionTypeEnum, name="assessmentquestiontypeenum"),
+        nullable=False,
+    )
+    question_text = Column(Text, nullable=False)
+    question_order = Column(Integer, nullable=False)
+
+    # MCQ contracts (mirrors McqQuestion).
+    options = Column(JSON, nullable=True)  # list of answer strings (>= 2)
+    correct_index = Column(Integer, nullable=True)  # server-side only
+    marks = Column(Integer, nullable=True)
+    explanation = Column(Text, nullable=True)
+
+    # Coding contracts (mirrors CodingProblem).
+    title = Column(String, nullable=True)
+    category = Column(String, nullable=True)
+    difficulty = Column(String, nullable=True)
+    input_format = Column(Text, nullable=True)
+    output_format = Column(Text, nullable=True)
+    constraints = Column(Text, nullable=True)
+    sample_cases = Column(JSON, nullable=True)  # [{"input", "expected"}]
+    hidden_cases = Column(JSON, nullable=True)  # server-side only
+    time_limit_seconds = Column(Integer, nullable=True)
+    supported_languages = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    section = relationship("AssessmentSection", back_populates="questions")
+    answers = relationship(
+        "AssessmentAnswer",
+        back_populates="question",
+        cascade="all, delete-orphan",
+    )
