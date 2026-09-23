@@ -12,6 +12,7 @@ from app.routes.candidate_assessments import _my_assignment, candidate_only
 from app.routes.candidate_assessment_start import _deadline_at, _sections_out
 from app.services.code_executor import execute_code, validate_code
 from app.services.coding_tests import SUPPORTED_LANGUAGES, time_limit_seconds
+from app.services.notifications import create_notification
 
 router = APIRouter(
     prefix="/me/assessments", tags=["candidate-assessment-answers"]
@@ -84,6 +85,10 @@ def _finalize_if_expired(
         )
         .execution_options(synchronize_session=False)
     )
+    # The atomic transition above can win exactly once, so the company-facing
+    # auto-submit notification is created exactly once too (retries never
+    # duplicate it). Built and committed with the transition itself.
+    _notify_company_submission(db, assignment, auto=True)
     db.commit()
     db.refresh(assignment)
     return True
@@ -199,6 +204,47 @@ def _submit_out(
         status=assignment.status,
         submitted_at=assignment.submitted_at,
         answered_count=answered,
+    )
+
+
+def _notify_company_submission(
+    db: Session,
+    assignment: models.AssessmentAssignment,
+    *,
+    auto: bool,
+) -> None:
+    """Queue (without committing) the company-facing submission notification.
+
+    Called only by a request that actually performed the in_progress →
+    submitted transition (explicit submit or deadline auto-submit), which is
+    atomic and can win exactly once, so a retry or a concurrent request can
+    never create a duplicate. The recipient is the owning company's user (from
+    the assessment's company row — never from the client), so a notification
+    can never land in another company's inbox. The message carries only the
+    assessment title and candidate name: never answers, hidden cases, code or
+    scores.
+    """
+    company = assignment.assessment.company
+    if company is None:
+        return
+    candidate_name = assignment.candidate.name if assignment.candidate else None
+    display = candidate_name or "A candidate"
+    if auto:
+        title = "Assessment Auto-submitted"
+        message = (
+            f"{display}'s attempt at '{assignment.assessment.title}' was "
+            "auto-submitted after the deadline."
+        )
+    else:
+        title = "Assessment Submitted"
+        message = f"{display} submitted '{assignment.assessment.title}'."
+    create_notification(
+        db,
+        company.user_id,
+        type=models.NotificationType.assessment,
+        title=title,
+        message=message,
+        link=f"/company/assessments/{assignment.assessment_id}",
     )
 
 
@@ -467,6 +513,10 @@ def submit_assessment(
             )
         return _submit_out(db, assignment)
 
+    # The atomic transition above can win exactly once, so the explicit-submit
+    # notification is created exactly once too (re-submits / retries never
+    # duplicate it). Built and committed with the transition itself.
+    _notify_company_submission(db, assignment, auto=False)
     db.commit()
     db.refresh(assignment)
     return _submit_out(db, assignment)

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.deps import get_db, get_company_for_user, require_company_approved
 from app.auth import RoleChecker
 from app import models, schemas
+from app.services.notifications import create_notification
 
 router = APIRouter(prefix="/assessments", tags=["company-assessments"])
 
@@ -487,6 +488,23 @@ def assign_candidates(
         for candidate in candidates
     ]
     db.add_all(assignments)
+
+    # Notify each newly assigned candidate, atomically with the assignments:
+    # a failed or duplicate request rolls everything back, so a notification
+    # can never be persisted without its assignment or duplicated by a retry.
+    for candidate in candidates:
+        create_notification(
+            db,
+            candidate.id,
+            type=models.NotificationType.assessment,
+            title="Assessment Assigned",
+            message=(
+                f"You've been assigned '{assessment.title}' by "
+                f"{assessment.company.name}."
+            ),
+            link="/dashboard/company-assessments",
+        )
+
     try:
         db.commit()
     except IntegrityError:
