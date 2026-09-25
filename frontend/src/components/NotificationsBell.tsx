@@ -8,6 +8,7 @@ import {
   markNotificationRead,
   markAllNotificationsRead,
 } from "../lib/notifications";
+import { parseApiDate } from "../lib/datetime";
 
 interface NotificationsBellProps {
   /* Extra classes for the trigger button so it blends with its shell. */
@@ -65,7 +66,13 @@ export default function NotificationsBell({
   };
 
   const onMarkAllRead = async () => {
-    await markAllNotificationsRead().catch(() => undefined);
+    // Only clear the badge once the server has actually done it: a swallowed
+    // failure would show "0 unread" while every notification stays unread.
+    try {
+      await markAllNotificationsRead();
+    } catch {
+      return;
+    }
     setNotifications((items) => items.map((n) => ({ ...n, read: true })));
     setUnreadCount(0);
   };
@@ -73,11 +80,15 @@ export default function NotificationsBell({
   const onOpenNotification = async (note: NotificationItem) => {
     setOpen(false);
     if (!note.read) {
-      markNotificationRead(note.id).catch(() => undefined);
-      setUnreadCount((count) => Math.max(0, count - 1));
-      setNotifications((items) =>
-        items.map((n) => (n.id === note.id ? { ...n, read: true } : n))
-      );
+      try {
+        await markNotificationRead(note.id);
+        setUnreadCount((count) => Math.max(0, count - 1));
+        setNotifications((items) =>
+          items.map((n) => (n.id === note.id ? { ...n, read: true } : n))
+        );
+      } catch {
+        // Keep the item unread so the badge still tells the truth.
+      }
     }
     if (note.link) navigate(note.link);
   };
@@ -163,7 +174,7 @@ export default function NotificationsBell({
                         {note.message}
                       </p>
                       <p className="text-[11px] text-gray-400 dark:text-gray-500 mt-1">
-                        {new Date(note.created_at).toLocaleString()}
+                        {parseApiDate(note.created_at)?.toLocaleString() ?? ""}
                       </p>
                     </div>
                   </div>

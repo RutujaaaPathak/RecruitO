@@ -7,7 +7,11 @@ from sqlalchemy.orm import Session
 
 from app.deps import get_db
 from app import models, schemas
-from app.routes.candidate_assessments import _my_assignment, candidate_only
+from app.routes.candidate_assessments import (
+    _my_assignment,
+    candidate_only,
+    start_blocker,
+)
 
 router = APIRouter(prefix="/me/assessments", tags=["candidate-assessment-start"])
 
@@ -106,33 +110,10 @@ def start_my_assessment(
     assignment = _my_assignment(db, current_user, assessment_id)
     assessment = assignment.assessment
 
-    if assessment.status != models.CompanyAssessmentStatusEnum.published:
-        raise HTTPException(
-            status_code=400,
-            detail="Assessment is not currently available",
-        )
-
     now = datetime.utcnow()
-    if assessment.starts_at is not None and now < assessment.starts_at:
-        raise HTTPException(
-            status_code=400,
-            detail="Assessment has not started yet",
-        )
-    if assessment.ends_at is not None and now > assessment.ends_at:
-        raise HTTPException(
-            status_code=400,
-            detail="Assessment window has ended",
-        )
-    if (
-        assessment.duration_minutes is not None
-        and assessment.ends_at is not None
-        and now + timedelta(minutes=assessment.duration_minutes)
-        > assessment.ends_at
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Not enough time remaining to complete the assessment",
-        )
+    blocker = start_blocker(assessment, now)
+    if blocker is not None:
+        raise HTTPException(status_code=400, detail=blocker)
 
     if assignment.status == models.AssessmentAssignmentStatusEnum.submitted:
         raise HTTPException(

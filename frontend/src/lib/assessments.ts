@@ -1,5 +1,6 @@
 import { api } from "./api";
 import type { AssessmentAssignmentStatus } from "./assignments";
+import { parseApiDate, toDateTimeLocalInput } from "./datetime";
 
 export type AssessmentStatus = "draft" | "published" | "closed";
 
@@ -130,22 +131,12 @@ export function assessmentStatusBadgeClass(status: AssessmentStatus): string {
 
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return "Not set";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "Not set";
+  const date = parseApiDate(iso);
+  if (!date) return "Not set";
   return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
   })}`;
-}
-
-function toDateTimeLocalValue(iso: string | null): string {
-  if (!iso) return "";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  const pad = (n: number): string => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
-    date.getDate()
-  )}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 export function emptyAssessmentForm(): AssessmentFormState {
@@ -172,8 +163,8 @@ export function assessmentToFormState(
       assessment.duration_minutes != null
         ? String(assessment.duration_minutes)
         : "",
-    startsAt: toDateTimeLocalValue(assessment.starts_at),
-    endsAt: toDateTimeLocalValue(assessment.ends_at),
+    startsAt: toDateTimeLocalInput(assessment.starts_at),
+    endsAt: toDateTimeLocalInput(assessment.ends_at),
   };
 }
 
