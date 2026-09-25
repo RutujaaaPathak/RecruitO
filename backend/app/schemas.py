@@ -1092,6 +1092,13 @@ class CandidateAssessmentAssignmentOut(BaseModel):
     candidate's own assignment state and timestamps. No company/admin
     internals (assessment lifecycle status, company id), no scoring
     configuration, and nothing belonging to other candidates.
+
+    ``unavailable_reason`` is the only lifecycle information a candidate needs:
+    for an untouched (``assigned``) attempt it is the exact reason
+    ``POST /me/assessments/{id}/start`` would reject with (``None`` when the
+    attempt can be started now), so the UI can disable Start instead of letting
+    the candidate trigger a guaranteed 400. An already-started or submitted
+    attempt is never blocked by it.
     """
 
     id: int
@@ -1104,6 +1111,7 @@ class CandidateAssessmentAssignmentOut(BaseModel):
     starts_at: Optional[datetime] = None
     ends_at: Optional[datetime] = None
     status: AssessmentAssignmentStatusEnum
+    unavailable_reason: Optional[str] = None
     assigned_at: datetime
     started_at: Optional[datetime] = None
     submitted_at: Optional[datetime] = None

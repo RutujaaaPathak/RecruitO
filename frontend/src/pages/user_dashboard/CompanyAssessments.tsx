@@ -24,6 +24,9 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api } from "../../lib/api";
+import { apiTime, parseApiDate } from "../../lib/datetime";
+import type { ApiDate } from "../../lib/datetime";
+import { useAuthStore } from "../../store/AuthStore";
 
 // ---------------------------------------------------------------------------
 // Backend response shapes (mirror backend/app/schemas.py)
@@ -49,6 +52,8 @@ interface CandidateAssessmentAssignmentOut {
   starts_at: string | null;
   ends_at: string | null;
   status: AssignmentStatus;
+  // Why start would be rejected, verbatim from the backend (null = startable).
+  unavailable_reason: string | null;
   assigned_at: string;
   started_at: string | null;
   submitted_at: string | null;
@@ -136,6 +141,7 @@ interface CandidateAssessmentStartOut {
 
 interface CandidateAssessmentAttemptOut extends CandidateAssessmentStartOut {
   answers: AssessmentAnswerOut[];
+  submitted_at: string | null;
 }
 
 interface CandidateAssessmentSubmitOut {
@@ -185,18 +191,20 @@ function isExpiredError(e: unknown): boolean {
   );
 }
 
-function formatDate(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleDateString(undefined, {
+function formatDate(iso: ApiDate): string {
+  const date = parseApiDate(iso);
+  if (!date) return "—";
+  return date.toLocaleDateString(undefined, {
     year: "numeric",
     month: "short",
     day: "numeric",
   });
 }
 
-function formatDateTime(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleString(undefined, {
+function formatDateTime(iso: ApiDate): string {
+  const date = parseApiDate(iso);
+  if (!date) return "—";
+  return date.toLocaleString(undefined, {
     month: "short",
     day: "numeric",
     hour: "numeric",
@@ -222,19 +230,50 @@ function defaultLang(q: CandidateAssessmentQuestionOut): string {
 }
 
 function isWindowPending(a: CandidateAssessmentAssignmentOut): boolean {
-  return (
-    a.status === "assigned" &&
-    a.starts_at != null &&
-    Date.now() < new Date(a.starts_at).getTime()
-  );
+  if (a.status !== "assigned") return false;
+  const opensAt = apiTime(a.starts_at);
+  return opensAt !== null && Date.now() < opensAt;
 }
 
 function isWindowOver(a: CandidateAssessmentAssignmentOut): boolean {
-  return (
-    a.status === "assigned" &&
-    a.ends_at != null &&
-    Date.now() > new Date(a.ends_at).getTime()
-  );
+  if (a.status !== "assigned") return false;
+  const closesAt = apiTime(a.ends_at);
+  return closesAt !== null && Date.now() > closesAt;
+}
+
+/**
+ * The moment a started attempt really ends: the earlier of the window end and
+ * start + duration, exactly as the backend computes it for `deadline_at`. The
+ * list rows carry no `deadline_at`, so derive it to avoid promising the
+ * candidate time the server will refuse to grade.
+ */
+function effectiveDeadlineAt(a: CandidateAssessmentAssignmentOut): number | null {
+  const startedAt = apiTime(a.started_at);
+  const closesAt = apiTime(a.ends_at);
+  if (startedAt === null) return closesAt;
+  const fromDuration = a.duration_minutes
+    ? startedAt + a.duration_minutes * 60_000
+    : null;
+  if (closesAt === null) return fromDuration;
+  if (fromDuration === null) return closesAt;
+  return Math.min(fromDuration, closesAt);
+}
+
+/**
+ * Why this assignment cannot be started yet, or null when it can. Window
+ * checks use the local clock so a page left open past the opening time unlocks
+ * by itself; everything else comes from the backend's own reason so the UI
+ * never offers a Start the server would reject.
+ */
+function startBlockedReason(a: CandidateAssessmentAssignmentOut): string | null {
+  if (a.status !== "assigned") return null;
+  if (isWindowPending(a)) {
+    return `This assessment opens on ${formatDateTime(a.starts_at)}.`;
+  }
+  if (isWindowOver(a)) {
+    return "The window for this assessment has closed.";
+  }
+  return a.unavailable_reason;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,15 +282,24 @@ function isWindowOver(a: CandidateAssessmentAssignmentOut): boolean {
 
 type View = "loading" | "list" | "instructions" | "active" | "completed";
 
-const mcqDraftKey = (assessmentId: number) =>
-  `recruito.ca.${assessmentId}.mcq`;
-const codeDraftKey = (assessmentId: number, questionId: number) =>
-  `recruito.ca.${assessmentId}.code.${questionId}`;
-const langDraftKey = (assessmentId: number, questionId: number) =>
-  `recruito.ca.${assessmentId}.lang.${questionId}`;
+// Drafts are a per-candidate, per-assessment resilience net (the API never
+// returns stored code), so the keys carry the signed-in account: a shared or
+// lab browser must never hand one candidate's answers to the next.
+function draftKeys(scope: string | null) {
+  const prefix = `recruito.ca.${encodeURIComponent(scope ?? "anonymous")}`;
+  return {
+    mcq: (assessmentId: number) => `${prefix}.${assessmentId}.mcq`,
+    code: (assessmentId: number, questionId: number) =>
+      `${prefix}.${assessmentId}.code.${questionId}`,
+    lang: (assessmentId: number, questionId: number) =>
+      `${prefix}.${assessmentId}.lang.${questionId}`,
+  };
+}
 
 export default function CompanyAssessments() {
   const [view, setView] = useState<View>("loading");
+  const signedInEmail = useAuthStore((s) => s.email);
+  const drafts = useMemo(() => draftKeys(signedInEmail), [signedInEmail]);
 
   const [assignments, setAssignments] = useState<
     CandidateAssessmentAssignmentOut[]
@@ -389,7 +437,7 @@ export default function CompanyAssessments() {
 
   const persistMcqDraft = (assessmentId: number, sel: Record<number, number>): void => {
     try {
-      localStorage.setItem(mcqDraftKey(assessmentId), JSON.stringify(sel));
+      localStorage.setItem(drafts.mcq(assessmentId), JSON.stringify(sel));
     } catch {
       // localStorage unavailable — the server copy is the source of truth.
     }
@@ -397,12 +445,16 @@ export default function CompanyAssessments() {
 
   const clearDrafts = (attempt_: CandidateAssessmentAttemptOut): void => {
     try {
-      localStorage.removeItem(mcqDraftKey(attempt_.assessment_id));
+      localStorage.removeItem(drafts.mcq(attempt_.assessment_id));
       for (const section of attempt_.sections) {
         for (const question of section.questions) {
           if (question.question_type === "coding") {
-            localStorage.removeItem(codeDraftKey(attempt_.assessment_id, question.id));
-            localStorage.removeItem(langDraftKey(attempt_.assessment_id, question.id));
+            localStorage.removeItem(
+              drafts.code(attempt_.assessment_id, question.id)
+            );
+            localStorage.removeItem(
+              drafts.lang(attempt_.assessment_id, question.id)
+            );
           }
         }
       }
@@ -415,6 +467,10 @@ export default function CompanyAssessments() {
     const sel: Record<number, number> = {};
     const savedSel: Record<number, number> = {};
     const verdicts: Record<number, AssessmentAnswerOut> = {};
+    // Only what the server has actually stored counts as saved. The API never
+    // returns stored code, so coding drafts stay "unsaved" on purpose: marking
+    // them saved would make submit skip the save and drop the candidate's work.
+    const savedLangs: Record<number, string> = {};
     for (const answer of data.answers) {
       if (answer.selected_option !== null && answer.selected_option !== undefined) {
         sel[answer.question_id] = answer.selected_option;
@@ -422,6 +478,7 @@ export default function CompanyAssessments() {
       }
       if (answer.language) {
         verdicts[answer.question_id] = answer;
+        savedLangs[answer.question_id] = answer.language;
       }
     }
 
@@ -429,7 +486,7 @@ export default function CompanyAssessments() {
     // code, so a re-entered coding editor restores its draft from localStorage.
     // Server answers are authoritative — drafts only fill unanswered questions.
     try {
-      const raw = localStorage.getItem(mcqDraftKey(data.assessment_id));
+      const raw = localStorage.getItem(drafts.mcq(data.assessment_id));
       if (raw) {
         const parsed = JSON.parse(raw) as Record<string, number>;
         for (const key of Object.keys(parsed)) {
@@ -445,20 +502,31 @@ export default function CompanyAssessments() {
 
     const code: Record<number, string> = {};
     const lang: Record<number, string> = {};
-    for (const section of data.sections) {
-      for (const question of section.questions) {
-        if (question.question_type !== "coding") continue;
-        const draftCode = localStorage.getItem(
-          codeDraftKey(data.assessment_id, question.id)
-        );
-        if (draftCode) code[question.id] = draftCode;
-        const draftLang = localStorage.getItem(
-          langDraftKey(data.assessment_id, question.id)
-        );
-        lang[question.id] =
-          draftLang ||
-          verdicts[question.id]?.language ||
-          defaultLang(question);
+    // Same resilience contract for the code drafts: a read failure there used to
+    // abort the whole restore, leaving a live attempt unopenable.
+    try {
+      for (const section of data.sections) {
+        for (const question of section.questions) {
+          if (question.question_type !== "coding") continue;
+          const draftCode = localStorage.getItem(
+            drafts.code(data.assessment_id, question.id)
+          );
+          if (draftCode) code[question.id] = draftCode;
+          const draftLang = localStorage.getItem(
+            drafts.lang(data.assessment_id, question.id)
+          );
+          lang[question.id] =
+            draftLang ||
+            verdicts[question.id]?.language ||
+            defaultLang(question);
+        }
+      }
+    } catch {
+      // localStorage unavailable — fall back to the server answers below.
+    }
+    for (const questionId of Object.keys(verdicts).map(Number)) {
+      if (lang[questionId] === undefined) {
+        lang[questionId] = verdicts[questionId].language ?? "python";
       }
     }
 
@@ -466,8 +534,8 @@ export default function CompanyAssessments() {
     setSavedSelections(savedSel);
     setCodeByQ(code);
     setLangByQ(lang);
-    setSavedCode({ ...code });
-    setSavedLang({ ...lang });
+    setSavedCode({});
+    setSavedLang(savedLangs);
     setVerdictByQ(verdicts);
     setActiveQ(0);
     setTimerLeft(null);
@@ -500,6 +568,9 @@ export default function CompanyAssessments() {
         `/me/assessments/${a.assessment_id}`
       );
       setDetail(d);
+      // Trust the freshest row for the Start gate: the company may have
+      // published/closed the assessment or the window may have just opened.
+      setSelected(d);
     } catch {
       // The list row already carries title/description/instructions; the
       // section pipeline is a nice-to-have, so a failed detail fetch is not
@@ -540,7 +611,8 @@ export default function CompanyAssessments() {
           const started = await api.post<CandidateAssessmentStartOut>(
             `/me/assessments/${a.assessment_id}/start`
           );
-          data = { ...started, answers: [] };
+          // A fresh start has no answers and no submission yet.
+          data = { ...started, answers: [], submitted_at: null };
         } catch (e) {
           // A concurrent start won the race: treat as already started.
           if (isExpiredError(e)) {
@@ -686,8 +758,12 @@ export default function CompanyAssessments() {
         await saveCurrentAnswer();
       } catch (e) {
         // The deadline may have passed mid-save; the submit call below is
-        // authoritative and auto-submits on expiry anyway.
-        if (!isExpiredError(e)) throw e;
+        // authoritative and auto-submits on expiry anyway. An expiry submit
+        // must also survive a plain save failure (offline, 5xx, a grading
+        // timeout): giving up there would leave the attempt in_progress with
+        // the server refusing every later answer, i.e. the candidate's work
+        // silently unscored. A manual submit still surfaces the failure.
+        if (!auto && !isExpiredError(e)) throw e;
       }
       const res = await api.post<CandidateAssessmentSubmitOut>(
         `/me/assessments/${attempt.assessment_id}/submit`
@@ -741,9 +817,9 @@ export default function CompanyAssessments() {
     if (view !== "active" || !attempt?.deadline_at) return;
 
     const tick = (): void => {
-      const remaining = Math.floor(
-        (new Date(attempt.deadline_at as string).getTime() - Date.now()) / 1000
-      );
+      const deadlineAt = apiTime(attempt.deadline_at);
+      if (deadlineAt === null) return;
+      const remaining = Math.floor((deadlineAt - Date.now()) / 1000);
       setTimerLeft(remaining);
       if (remaining <= 0 && !submittingRef.current) {
         void submitRef.current(true);
@@ -771,7 +847,7 @@ export default function CompanyAssessments() {
       const next = { ...prev, [question.id]: value };
       try {
         localStorage.setItem(
-          codeDraftKey(attempt.assessment_id, question.id),
+          drafts.code(attempt.assessment_id, question.id),
           value
         );
       } catch {
@@ -787,7 +863,7 @@ export default function CompanyAssessments() {
       const next = { ...prev, [question.id]: lang };
       try {
         localStorage.setItem(
-          langDraftKey(attempt.assessment_id, question.id),
+          drafts.lang(attempt.assessment_id, question.id),
           lang
         );
       } catch {
@@ -887,6 +963,15 @@ export default function CompanyAssessments() {
         </span>
       );
     }
+    if (a.unavailable_reason) {
+      // Published state changes (or the window closes) are reported by the
+      // backend; an "Open" badge here would promise a start that gets rejected.
+      return (
+        <span className="text-[11px] uppercase tracking-wider px-2.5 py-1 rounded-full border bg-white/10 border-white/20 text-white/60">
+          Unavailable
+        </span>
+      );
+    }
     return (
       <span className="text-[11px] uppercase tracking-wider px-2.5 py-1 rounded-full border bg-blue-500/15 border-blue-500/30 text-blue-300">
         Open
@@ -929,34 +1014,37 @@ export default function CompanyAssessments() {
             <Clock size={18} className="text-violet-300" /> In progress
           </h2>
           <div className="space-y-3">
-            {inProgressAssignments.map((a) => (
-              <motion.div
-                key={a.assessment_id}
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="p-5 rounded-2xl bg-white/5 border border-white/10 flex flex-wrap items-center justify-between gap-4 hover:bg-white/10 transition"
-              >
-                <div>
-                  <p className="font-semibold">{a.title}</p>
-                  <p className="text-white/50 text-sm">{a.company_name}</p>
-                  <p className="text-white/40 text-xs mt-1">
-                    {a.duration_minutes
-                      ? `${a.duration_minutes} min • `
-                      : ""}
-                    started {formatDate(a.started_at)}
-                    {a.ends_at
-                      ? ` • deadline ${formatDateTime(a.ends_at)}`
-                      : ""}
-                  </p>
-                </div>
-                <Button
-                  onClick={() => void openInstructions(a)}
-                  className="bg-gradient-to-r from-violet-600 to-blue-600 text-white"
+            {inProgressAssignments.map((a) => {
+              const deadline = effectiveDeadlineAt(a);
+              return (
+                <motion.div
+                  key={a.assessment_id}
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="p-5 rounded-2xl bg-white/5 border border-white/10 flex flex-wrap items-center justify-between gap-4 hover:bg-white/10 transition"
                 >
-                  <Play size={16} /> Resume
-                </Button>
-              </motion.div>
-            ))}
+                  <div>
+                    <p className="font-semibold">{a.title}</p>
+                    <p className="text-white/50 text-sm">{a.company_name}</p>
+                    <p className="text-white/40 text-xs mt-1">
+                      {a.duration_minutes
+                        ? `${a.duration_minutes} min • `
+                        : ""}
+                      started {formatDate(a.started_at)}
+                      {deadline !== null
+                        ? ` • deadline ${formatDateTime(deadline)}`
+                        : ""}
+                    </p>
+                  </div>
+                  <Button
+                    onClick={() => void openInstructions(a)}
+                    className="bg-gradient-to-r from-violet-600 to-blue-600 text-white"
+                  >
+                    <Play size={16} /> Resume
+                  </Button>
+                </motion.div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -972,8 +1060,7 @@ export default function CompanyAssessments() {
         ) : (
           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
             {pendingAssignments.map((a, index) => {
-              const pending = isWindowPending(a);
-              const over = isWindowOver(a);
+              const blocked = startBlockedReason(a);
               return (
                 <motion.div
                   key={a.assessment_id}
@@ -998,14 +1085,16 @@ export default function CompanyAssessments() {
                   </p>
                   <Button
                     size="sm"
-                    disabled={pending || over}
+                    disabled={blocked !== null}
                     onClick={() => void openInstructions(a)}
                     className="bg-gradient-to-r from-violet-600 to-blue-600 text-white mt-auto disabled:from-white/10 disabled:to-white/10 disabled:text-white/40"
                   >
-                    {pending
+                    {isWindowPending(a)
                       ? "Opens later"
-                      : over
+                      : isWindowOver(a)
                       ? "Window closed"
+                      : blocked
+                      ? "Not Available"
                       : "Start Assessment"}
                   </Button>
                 </motion.div>
@@ -1076,6 +1165,7 @@ export default function CompanyAssessments() {
 
     const pending = isWindowPending(selected);
     const over = isWindowOver(selected);
+    const blocked = startBlockedReason(selected);
     const sections = detail?.sections ?? [];
 
     return (
@@ -1093,8 +1183,11 @@ export default function CompanyAssessments() {
             )}. You cannot start it before then.`}
           />
         )}
-        {over && (
+        {!pending && over && (
           <WarnBanner message="The window for this assessment has closed." />
+        )}
+        {!pending && !over && blocked && (
+          <WarnBanner message={blocked} />
         )}
 
         <motion.div
@@ -1206,7 +1299,7 @@ export default function CompanyAssessments() {
           ) : (
             <Button
               onClick={() => void beginAttempt(selected)}
-              disabled={beginning || pending || over}
+              disabled={beginning || blocked !== null}
               className="bg-gradient-to-r from-violet-600 to-blue-600 text-white"
             >
               {beginning ? (
@@ -1214,7 +1307,7 @@ export default function CompanyAssessments() {
               ) : (
                 <Play size={16} />
               )}
-              {pending || over ? "Not Available" : "Start Assessment"}
+              {blocked ? "Not Available" : "Start Assessment"}
             </Button>
           )}
         </div>
@@ -1735,7 +1828,7 @@ export default function CompanyAssessments() {
   const renderCompleted = () => {
     const title = selected?.title ?? attempt?.title ?? "Assessment";
     const company = selected?.company_name ?? attempt?.company_name ?? "";
-    const submittedAt = selected?.submitted_at ?? null;
+    const submittedAt = attempt?.submitted_at ?? selected?.submitted_at ?? null;
 
     return (
       <div className="space-y-8">

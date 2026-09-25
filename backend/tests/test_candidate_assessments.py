@@ -314,6 +314,105 @@ def test_detail_does_not_expose_private_fields(db):
 
 
 # ---------------------------------------------------------------------------
+# Start availability contract (unavailable_reason)
+# ---------------------------------------------------------------------------
+def test_unavailable_reason_is_none_when_the_attempt_can_be_started(db):
+    owner = _company_user(db, 1)
+    company = _company(db, owner)
+    candidate = _user(db, 10)
+    now = datetime.utcnow()
+    assessment = _assessment(
+        db, company, duration_minutes=90,
+        starts_at=now - timedelta(days=1), ends_at=now + timedelta(days=1),
+    )
+    _assignment(db, assessment, candidate)
+
+    assert list_my_assessments(candidate, db)[0].unavailable_reason is None
+    assert get_my_assignment(assessment.id, candidate, db).unavailable_reason is None
+    assert get_my_assessment(assessment.id, candidate, db).unavailable_reason is None
+
+
+def test_unavailable_reason_explains_why_a_untouched_attempt_is_blocked(db):
+    owner = _company_user(db, 1)
+    company = _company(db, owner)
+    candidate = _user(db, 10)
+    now = datetime.utcnow()
+    unpublished = _assessment(
+        db, company, title="Draft",
+        status=models.CompanyAssessmentStatusEnum.draft,
+        starts_at=now - timedelta(days=1), ends_at=now + timedelta(days=1),
+    )
+    upcoming = _assessment(
+        db, company, title="Upcoming",
+        starts_at=now + timedelta(hours=1), ends_at=now + timedelta(days=1),
+    )
+    ended = _assessment(
+        db, company, title="Ended",
+        starts_at=now - timedelta(days=2), ends_at=now - timedelta(hours=1),
+    )
+    too_short = _assessment(
+        db, company, title="Too short", duration_minutes=90,
+        starts_at=now - timedelta(days=1), ends_at=now + timedelta(minutes=10),
+    )
+    for assessment in (unpublished, upcoming, ended, too_short):
+        _assignment(db, assessment, candidate)
+
+    reported = {
+        row.assessment_id: row.unavailable_reason
+        for row in list_my_assessments(candidate, db)
+    }
+    # Every block reason is a complete sentence the candidate UI can show as-is.
+    assert reported[unpublished.id] == "Assessment is not currently available"
+    assert reported[upcoming.id] == "Assessment has not started yet"
+    assert reported[ended.id] == "Assessment window has ended"
+    assert reported[too_short.id] == (
+        "Not enough time remaining to complete the assessment"
+    )
+    # Detail + status endpoints report the same reason as the list.
+    assert get_my_assessment(
+        unpublished.id, candidate, db
+    ).unavailable_reason == "Assessment is not currently available"
+    assert get_my_assignment(
+        too_short.id, candidate, db
+    ).unavailable_reason == "Not enough time remaining to complete the assessment"
+
+
+def test_unavailable_reason_is_none_once_the_attempt_has_run(db):
+    owner = _company_user(db, 1)
+    company = _company(db, owner)
+    candidate = _user(db, 10)
+    now = datetime.utcnow()
+    # Closing the assessment blocks a fresh start, but it must not retroactively
+    # mark an in-progress or submitted attempt as unavailable: those are
+    # resumed/reviewed, never restarted, so gating them would hide the result.
+    running = _assessment(
+        db, company, title="Running", status=models.CompanyAssessmentStatusEnum.closed,
+        starts_at=now - timedelta(days=2), ends_at=now - timedelta(hours=1),
+    )
+    done = _assessment(
+        db, company, title="Done", status=models.CompanyAssessmentStatusEnum.closed,
+        starts_at=now - timedelta(days=2), ends_at=now - timedelta(hours=1),
+    )
+    _assignment(
+        db, running, candidate,
+        status=models.AssessmentAssignmentStatusEnum.in_progress,
+        started_at=now - timedelta(hours=2),
+    )
+    _assignment(
+        db, done, candidate,
+        status=models.AssessmentAssignmentStatusEnum.submitted,
+        started_at=now - timedelta(hours=2), submitted_at=now - timedelta(hours=1),
+    )
+
+    reported = {
+        row.assessment_id: row.unavailable_reason
+        for row in list_my_assessments(candidate, db)
+    }
+    assert reported[running.id] is None
+    assert reported[done.id] is None
+
+
+# ---------------------------------------------------------------------------
 # Isolation — another candidate / another company / unassigned
 # ---------------------------------------------------------------------------
 def test_cannot_view_another_candidates_assessment(db):

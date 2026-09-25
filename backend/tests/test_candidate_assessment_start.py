@@ -398,6 +398,66 @@ def test_start_rejected_before_and_after_window_when_open_edges(db):
     assert out.deadline_at == out.started_at + timedelta(minutes=90)
 
 
+def test_start_rejection_reasons_match_the_listed_unavailable_reason(db):
+    """The list/detail contract and the start endpoint must never disagree: for
+    every scenario the ``unavailable_reason`` a candidate's UI reads is exactly
+    the 400 detail ``start`` raises, so the UI can gate Start without guessing."""
+    owner = _company_user(db, 1)
+    company = _company(db, owner)
+    candidate = _user(db, 10)
+    now = _now()
+
+    draft = _assessment(
+        db, company, title="Draft",
+        status=models.CompanyAssessmentStatusEnum.draft, **_active_window(now),
+    )
+    upcoming = _assessment(
+        db, company, title="Upcoming",
+        starts_at=now + timedelta(hours=1), ends_at=now + timedelta(days=1),
+    )
+    ended = _assessment(
+        db, company, title="Ended",
+        starts_at=now - timedelta(days=2), ends_at=now - timedelta(hours=1),
+    )
+    too_short = _assessment(
+        db, company, title="Too short", duration_minutes=90,
+        starts_at=now - timedelta(days=1), ends_at=now + timedelta(minutes=10),
+    )
+    startable = _assessment(db, company, title="Startable", **_active_window(now))
+    for assessment in (draft, upcoming, ended, too_short, startable):
+        _assignment(db, assessment, candidate)
+
+    reported = {
+        row.assessment_id: row.unavailable_reason
+        for row in list_my_assessments(candidate, db)
+    }
+    assert reported[draft.id] == "Assessment is not currently available"
+    assert reported[upcoming.id] == "Assessment has not started yet"
+    assert reported[ended.id] == "Assessment window has ended"
+    assert reported[too_short.id] == (
+        "Not enough time remaining to complete the assessment"
+    )
+    assert reported[startable.id] is None
+
+    for assessment in (draft, upcoming, ended, too_short):
+        with pytest.raises(HTTPException) as exc:
+            start_my_assessment(assessment.id, candidate, db)
+        assert exc.value.status_code == 400
+        assert exc.value.detail == reported[assessment.id]
+
+    # The only startable one is startable in fact, and none of the rejected
+    # attempts consumed the window.
+    assert start_my_assessment(
+        startable.id, candidate, db
+    ).status == models.AssessmentAssignmentStatusEnum.in_progress
+    for assessment in (draft, upcoming, ended, too_short):
+        assert (
+            db.query(models.AssessmentAssignment)
+            .filter(models.AssessmentAssignment.assessment_id == assessment.id)
+            .one().status == models.AssessmentAssignmentStatusEnum.assigned
+        )
+
+
 # ---------------------------------------------------------------------------
 # Assignment state / duplicate start
 # ---------------------------------------------------------------------------

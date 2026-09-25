@@ -1,4 +1,6 @@
 # pyrefly: ignore [missing-import]
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -9,6 +11,65 @@ from app import models, schemas
 router = APIRouter(prefix="/me/assessments", tags=["candidate-assessments"])
 
 candidate_only = RoleChecker(["user"])
+
+
+# ---------------------------------------------------------------------------
+# Start availability (shared with candidate_assessment_start)
+# ---------------------------------------------------------------------------
+
+# The exact reasons ``POST /me/assessments/{id}/start`` rejects with, in the
+# order it checks them. They live here so the candidate list/detail contract can
+# report why an attempt cannot be started yet without a second, drifting copy of
+# the rule: the frontend disables its Start action from the same string the
+# endpoint would reject with.
+START_UNAVAILABLE_NOT_PUBLISHED = "Assessment is not currently available"
+START_UNAVAILABLE_NOT_STARTED_YET = "Assessment has not started yet"
+START_UNAVAILABLE_WINDOW_ENDED = "Assessment window has ended"
+START_UNAVAILABLE_NOT_ENOUGH_TIME = (
+    "Not enough time remaining to complete the assessment"
+)
+
+
+def start_blocker(
+    assessment: models.Assessment, now: datetime | None = None
+) -> str | None:
+    """The first lifecycle/window reason this assessment cannot be started,
+    or ``None`` when it is available right now.
+
+    Deliberately independent of the attempt's own state: ``start`` applies these
+    checks to every request, so they must stay ordered and worded exactly as the
+    endpoint reports them.
+    """
+    now = now or datetime.utcnow()
+    if assessment.status != models.CompanyAssessmentStatusEnum.published:
+        return START_UNAVAILABLE_NOT_PUBLISHED
+    if assessment.starts_at is not None and now < assessment.starts_at:
+        return START_UNAVAILABLE_NOT_STARTED_YET
+    if assessment.ends_at is not None and now > assessment.ends_at:
+        return START_UNAVAILABLE_WINDOW_ENDED
+    if (
+        assessment.duration_minutes is not None
+        and assessment.ends_at is not None
+        and now + timedelta(minutes=assessment.duration_minutes) > assessment.ends_at
+    ):
+        return START_UNAVAILABLE_NOT_ENOUGH_TIME
+    return None
+
+
+def start_unavailable_reason(
+    assignment: models.AssessmentAssignment,
+    assessment: models.Assessment,
+    now: datetime | None = None,
+) -> str | None:
+    """Why this candidate's attempt cannot be started yet, else ``None``.
+
+    Only an untouched (``assigned``) attempt is gated: an in-progress attempt is
+    resumed rather than restarted, and a submitted one is a finished snapshot —
+    neither is unavailable, so their list rows must not be marked as blocked.
+    """
+    if assignment.status != models.AssessmentAssignmentStatusEnum.assigned:
+        return None
+    return start_blocker(assessment, now)
 
 
 def _my_assignment(
@@ -49,6 +110,7 @@ def _candidate_out(
         starts_at=assessment.starts_at,
         ends_at=assessment.ends_at,
         status=assignment.status,
+        unavailable_reason=start_unavailable_reason(assignment, assessment),
         assigned_at=assignment.assigned_at,
         started_at=assignment.started_at,
         submitted_at=assignment.submitted_at,

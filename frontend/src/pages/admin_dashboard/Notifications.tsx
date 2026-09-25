@@ -6,6 +6,7 @@ import {
   markNotificationRead,
   markAllNotificationsRead,
 } from "../../lib/notifications";
+import { parseApiDate } from "../../lib/datetime";
 
 interface Notification {
   id: number;
@@ -32,7 +33,7 @@ export default function Notifications() {
             title: n.title,
             description: n.message,
             type: n.type,
-            time: new Date(n.created_at).toLocaleString(),
+            time: parseApiDate(n.created_at)?.toLocaleString() ?? "",
             read: n.read,
           }))
         );
@@ -51,16 +52,30 @@ export default function Notifications() {
 
   const unreadCount = notifications.filter((n) => !n.read).length;
 
-  const onMarkRead = (id: number) => {
+  const onMarkRead = async (id: number) => {
+    try {
+      await markNotificationRead(id);
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "Failed to mark the notification as read"
+      );
+      return;
+    }
     setNotifications((notes) =>
       notes.map((n) => (n.id === id ? { ...n, read: true } : n))
     );
-    markNotificationRead(id).catch(() => undefined);
   };
 
-  const onMarkAllRead = () => {
+  const onMarkAllRead = async () => {
+    try {
+      await markAllNotificationsRead();
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "Failed to mark notifications as read"
+      );
+      return;
+    }
     setNotifications((notes) => notes.map((n) => ({ ...n, read: true })));
-    markAllNotificationsRead().catch(() => undefined);
   };
 
   const typeColor = (type: string) => {
@@ -98,12 +113,6 @@ export default function Notifications() {
           )}
         </div>
       </div>
-
-      {error && (
-        <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
-          {error}
-        </div>
-      )}
 
       {error && (
         <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
