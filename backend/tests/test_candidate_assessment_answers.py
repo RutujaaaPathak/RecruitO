@@ -17,12 +17,13 @@ from datetime import datetime, timedelta
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, update
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app import models, schemas
 from app.auth import RoleChecker
+from app.routes import candidate_assessment_answer as answer_routes
 from app.routes.candidate_assessment_answer import (
     save_assessment_answer,
     submit_assessment,
@@ -679,6 +680,114 @@ def test_save_after_deadline_auto_submits_then_409(db):
     assert exc.value.status_code == 409
     assert "already been submitted" in exc.value.detail
     assert db.query(models.AssessmentAnswer).count() == 0
+
+
+def test_save_mcq_after_concurrent_submit_rejected(db, monkeypatch):
+    """A submit that commits before the write must block the answer.
+
+    Regression: the status check ran against an earlier read, so a concurrent
+    submit could not stop an answer from being persisted afterwards.
+    """
+    owner = _company_user(db, 1)
+    company = _company(db, owner)
+    candidate = _user(db, 10)
+    assessment = _assessment(db, company)
+    question = _mcq(
+        db, _section(db, assessment, 1, models.AssessmentSectionTypeEnum.aptitude), 1
+    )
+    assignment = _assignment(db, assessment, candidate)
+
+    real_owned = answer_routes._owned_question
+
+    def racing_owned(db_, assignment_, question_id):
+        q = real_owned(db_, assignment_, question_id)
+        # A concurrent submit wins and commits before the answer write.
+        db_.execute(
+            update(models.AssessmentAssignment)
+            .where(models.AssessmentAssignment.id == assignment_.id)
+            .values(
+                status=models.AssessmentAssignmentStatusEnum.submitted,
+                submitted_at=_now(),
+            )
+        )
+        db_.commit()
+        return q
+
+    monkeypatch.setattr(answer_routes, "_owned_question", racing_owned)
+
+    with pytest.raises(HTTPException) as exc:
+        save_assessment_answer(assessment.id, _mcq_payload(question, 0), candidate, db)
+    assert exc.value.status_code == 409
+    assert "already been submitted" in exc.value.detail
+    assert _answers(db, assignment.id) == []
+    db.refresh(assignment)
+    assert assignment.status == models.AssessmentAssignmentStatusEnum.submitted
+
+
+def test_save_coding_after_concurrent_submit_rejected(db, monkeypatch):
+    """A submit committing while grading runs must block the answer write."""
+    owner = _company_user(db, 1)
+    company = _company(db, owner)
+    candidate = _user(db, 10)
+    assessment = _assessment(db, company)
+    section = _section(db, assessment, 1, models.AssessmentSectionTypeEnum.coding)
+    question = _coding(db, section, 1)
+    assignment = _assignment(db, assessment, candidate)
+
+    def fake(language, code, test_cases, time_limit=5, memory_limit_mb=256):
+        db.execute(
+            update(models.AssessmentAssignment)
+            .where(models.AssessmentAssignment.id == assignment.id)
+            .values(
+                status=models.AssessmentAssignmentStatusEnum.submitted,
+                submitted_at=_now(),
+            )
+        )
+        db.commit()
+        return _exec_result(_passed_case(0), _passed_case(1))
+
+    monkeypatch.setattr(QUESTIONS, fake)
+
+    with pytest.raises(HTTPException) as exc:
+        save_assessment_answer(assessment.id, _coding_payload(question), candidate, db)
+    assert exc.value.status_code == 409
+    assert "already been submitted" in exc.value.detail
+    assert _answers(db, assignment.id) == []
+    db.refresh(assignment)
+    assert assignment.status == models.AssessmentAssignmentStatusEnum.submitted
+
+
+def test_save_coding_after_deadline_elapses_during_grading_rejected(db, monkeypatch):
+    """A deadline that passes while grading runs must block the answer write."""
+    owner = _company_user(db, 1)
+    company = _company(db, owner)
+    candidate = _user(db, 10)
+    assessment = _assessment(db, company, duration_minutes=10)
+    section = _section(db, assessment, 1, models.AssessmentSectionTypeEnum.coding)
+    question = _coding(db, section, 1)
+    assignment = _assignment(
+        db, assessment, candidate,
+        status=models.AssessmentAssignmentStatusEnum.in_progress,
+        started_at=_now() - timedelta(minutes=5),
+    )
+
+    def fake(language, code, test_cases, time_limit=5, memory_limit_mb=256):
+        # The effective deadline elapses before the answer is written.
+        db.execute(
+            update(models.AssessmentAssignment)
+            .where(models.AssessmentAssignment.id == assignment.id)
+            .values(started_at=_now() - timedelta(hours=2))
+        )
+        db.commit()
+        return _exec_result(_passed_case(0), _passed_case(1))
+
+    monkeypatch.setattr(QUESTIONS, fake)
+
+    with pytest.raises(HTTPException) as exc:
+        save_assessment_answer(assessment.id, _coding_payload(question), candidate, db)
+    assert exc.value.status_code == 409
+    assert "deadline" in exc.value.detail
+    assert _answers(db, assignment.id) == []
 
 
 # ---------------------------------------------------------------------------

@@ -72,7 +72,7 @@ def _finalize_if_expired(
     deadline = _deadline_at(assignment.assessment, assignment.started_at)
     if deadline is None or datetime.utcnow() <= deadline:
         return False
-    db.execute(
+    result = db.execute(
         update(models.AssessmentAssignment)
         .where(
             models.AssessmentAssignment.id == assignment.id,
@@ -85,6 +85,14 @@ def _finalize_if_expired(
         )
         .execution_options(synchronize_session=False)
     )
+    if result.rowcount == 0:
+        # A concurrent explicit submit or auto-submit already won the atomic
+        # in_progress → submitted transition. Only the winner may notify, so
+        # this loser must not: discard its (no-op) work and re-read the final
+        # state so callers observe that the attempt is already submitted.
+        db.rollback()
+        db.refresh(assignment)
+        return False
     # The atomic transition above can win exactly once, so the company-facing
     # auto-submit notification is created exactly once too (retries never
     # duplicate it). Built and committed with the transition itself.
@@ -106,6 +114,49 @@ def _ensure_accepting_answers(assignment: models.AssessmentAssignment) -> None:
         )
 
 
+def _reload_writable(
+    db: Session, assignment: models.AssessmentAssignment
+) -> models.AssessmentAssignment:
+    """Re-read (and row-lock where supported) the attempt inside the answer
+    write transaction, then re-assert it is still ``in_progress`` and before
+    its effective deadline.
+
+    The earlier ``_ensure_accepting_answers`` / expiry checks run against a read
+    taken before server-side grading: a concurrent submit can commit, or the
+    deadline can elapse, after that read but before the answer is written.
+    Selecting the row ``FOR UPDATE`` (a no-op on SQLite, whose writes are
+    serialized) and repopulating it here makes the final check observe the
+    committed state, and the row lock makes a concurrent submission wait for
+    this write to commit. The same 400/409 errors as the earlier guards are
+    raised, so callers see a consistent rejection.
+    """
+    locked = (
+        db.query(models.AssessmentAssignment)
+        .filter(models.AssessmentAssignment.id == assignment.id)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if (
+        locked is None
+        or locked.status == models.AssessmentAssignmentStatusEnum.submitted
+    ):
+        raise HTTPException(
+            status_code=409, detail="Assessment has already been submitted"
+        )
+    if locked.status == models.AssessmentAssignmentStatusEnum.assigned:
+        raise HTTPException(
+            status_code=400, detail="Assessment has not been started"
+        )
+    if locked.started_at is not None:
+        deadline = _deadline_at(locked.assessment, locked.started_at)
+        if deadline is not None and datetime.utcnow() > deadline:
+            raise HTTPException(
+                status_code=409, detail="Assessment deadline has passed"
+            )
+    return locked
+
+
 # ---------------------------------------------------------------------------
 # Persistence (idempotent upsert per (attempt, question))
 # ---------------------------------------------------------------------------
@@ -118,7 +169,10 @@ def _upsert_answer(
 ) -> models.AssessmentAnswer:
     """Write the latest answer for (assignment, question), creating or
     overwriting the single row. IntegrityError (a concurrent request winning
-    the insert) retries as an update so duplicates can never accumulate."""
+    the insert) retries as an update so duplicates can never accumulate. The
+    attempt is re-locked and re-checked here so a submission or expiry that
+    happened after the request's earlier read cannot be written past."""
+    _reload_writable(db, assignment)
     answer = (
         db.query(models.AssessmentAnswer)
         .filter(
@@ -136,6 +190,9 @@ def _upsert_answer(
             db.commit()
         except IntegrityError:
             db.rollback()
+            # The rollback released the guard's row lock; re-assert the attempt
+            # is still writable before the retry commits.
+            _reload_writable(db, assignment)
             answer = (
                 db.query(models.AssessmentAnswer)
                 .filter(

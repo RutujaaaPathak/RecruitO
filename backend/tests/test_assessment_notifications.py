@@ -20,6 +20,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine, event, update
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.pool import StaticPool
 
 from app import models, schemas
@@ -30,6 +31,7 @@ from app.routes.candidate_assessment_answer import (
     get_my_attempt,
     submit_assessment,
 )
+from app.services.notifications import create_notification
 
 
 @pytest.fixture
@@ -354,6 +356,69 @@ def test_submitting_after_expiry_notifies_once(db):
 
     (n,) = _notifications(db)
     assert n.title == "Assessment Auto-submitted"
+    assert _notification_count(db) == 1
+
+
+def test_auto_submit_losing_race_creates_no_duplicate_notification(db):
+    """Only the request that wins the transition may notify.
+
+    Regression: the deadline auto-submit notified unconditionally, so a caller
+    whose (earlier) read still said in_progress --- but which lost the atomic
+    transition to a concurrent submit --- created a duplicate notification.
+    """
+    owner = _company_user(db, 1)
+    company = _company(db, owner)
+    candidate = _user(db, 10, name="Grace Hopper")
+    assessment = _assessment(db, company, duration_minutes=10)
+    assignment = _assignment(
+        db, assessment, candidate,
+        status=models.AssessmentAssignmentStatusEnum.submitted,
+        started_at=_now() - timedelta(hours=2),
+        submitted_at=_now() - timedelta(hours=1),
+    )
+    # The winning request already created the one submission notification.
+    create_notification(
+        db, company.user_id, type=models.NotificationType.assessment,
+        title="Assessment Auto-submitted", message="already notified",
+    )
+    db.commit()
+    # This caller read the attempt as in_progress before the winner committed.
+    set_committed_value(
+        assignment, "status", models.AssessmentAssignmentStatusEnum.in_progress
+    )
+    assert _notification_count(db) == 1
+
+    assert _finalize_if_expired(db, assignment) is False
+
+    assert _notification_count(db) == 1  # never a duplicate
+    assert assignment.status == models.AssessmentAssignmentStatusEnum.submitted
+
+
+def test_submit_after_concurrent_auto_submit_notifies_once(db):
+    """Explicit submit racing a deadline auto-submit still notifies once."""
+    owner = _company_user(db, 1)
+    company = _company(db, owner)
+    candidate = _user(db, 10)
+    assessment = _assessment(db, company, duration_minutes=10)
+    assignment = _assignment(
+        db, assessment, candidate,
+        status=models.AssessmentAssignmentStatusEnum.submitted,
+        started_at=_now() - timedelta(hours=2),
+        submitted_at=_now() - timedelta(hours=1),
+    )
+    # A concurrent auto-submit already won and notified the company.
+    create_notification(
+        db, company.user_id, type=models.NotificationType.assessment,
+        title="Assessment Auto-submitted", message="already notified",
+    )
+    db.commit()
+    set_committed_value(
+        assignment, "status", models.AssessmentAssignmentStatusEnum.in_progress
+    )
+
+    out = submit_assessment(assessment.id, candidate, db)
+
+    assert out.status == models.AssessmentAssignmentStatusEnum.submitted
     assert _notification_count(db) == 1
 
 
