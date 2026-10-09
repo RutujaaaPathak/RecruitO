@@ -10,6 +10,7 @@ section order, and authentication/RBAC. No network, no external DB.
 from datetime import datetime, timedelta
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
@@ -128,6 +129,21 @@ def _section(db, assessment, order, section_type=models.AssessmentSectionTypeEnu
     return s
 
 
+def _question(db, section, order=1):
+    q = models.AssessmentQuestion(
+        section_id=section.id,
+        question_type=models.AssessmentQuestionTypeEnum.mcq,
+        question_text="Which option?",
+        question_order=order,
+        options=["a", "b"],
+        correct_index=0,
+        marks=1,
+    )
+    db.add(q)
+    db.flush()
+    return q
+
+
 # ---------------------------------------------------------------------------
 # Create
 # ---------------------------------------------------------------------------
@@ -213,6 +229,115 @@ def test_create_accepts_ordered_validity_window(db):
     assert result.ends_at == datetime(2026, 5, 10)
     assert result.duration_minutes == 60
     assert result.company_id == company.id
+
+
+# ---------------------------------------------------------------------------
+# Publication requirements (minimum content to go live)
+# ---------------------------------------------------------------------------
+def test_publish_requires_at_least_one_section(db):
+    u1 = _company_user(db, 1)
+    c1 = _company(db, u1)
+    a = _assessment(db, c1)
+
+    with pytest.raises(HTTPException) as exc:
+        update_assessment(
+            a.id,
+            schemas.AssessmentUpdate(
+                status=models.CompanyAssessmentStatusEnum.published
+            ),
+            u1,
+            db,
+        )
+    assert exc.value.status_code == 400
+    assert (
+        db.get(models.Assessment, a.id).status
+        == models.CompanyAssessmentStatusEnum.draft
+    )
+
+
+def test_publish_requires_at_least_one_question(db):
+    u1 = _company_user(db, 1)
+    c1 = _company(db, u1)
+    a = _assessment(db, c1)
+    _section(db, a, 1, models.AssessmentSectionTypeEnum.aptitude)
+
+    with pytest.raises(HTTPException) as exc:
+        update_assessment(
+            a.id,
+            schemas.AssessmentUpdate(
+                status=models.CompanyAssessmentStatusEnum.published
+            ),
+            u1,
+            db,
+        )
+    assert exc.value.status_code == 400
+    assert (
+        db.get(models.Assessment, a.id).status
+        == models.CompanyAssessmentStatusEnum.draft
+    )
+
+
+def test_publish_with_a_question_succeeds(db):
+    u1 = _company_user(db, 1)
+    c1 = _company(db, u1)
+    a = _assessment(db, c1)
+    section = _section(db, a, 1, models.AssessmentSectionTypeEnum.aptitude)
+    _question(db, section)
+
+    result = update_assessment(
+        a.id,
+        schemas.AssessmentUpdate(status=models.CompanyAssessmentStatusEnum.published),
+        u1,
+        db,
+    )
+    assert result.status == models.CompanyAssessmentStatusEnum.published
+
+
+def test_create_cannot_publish_without_content(db):
+    u1 = _company_user(db, 1)
+    _company(db, u1)
+
+    with pytest.raises(HTTPException) as exc:
+        create_assessment(
+            schemas.AssessmentCreate(
+                title="X", status=models.CompanyAssessmentStatusEnum.published
+            ),
+            u1,
+            db,
+        )
+    assert exc.value.status_code == 400
+
+
+def test_update_partial_window_invalid_against_stored_value(db):
+    u1 = _company_user(db, 1)
+    c1 = _company(db, u1)
+    a = _assessment(
+        db, c1, starts_at=datetime(2026, 5, 1), ends_at=datetime(2026, 5, 10)
+    )
+
+    # Only starts_at is sent; merged with the stored ends_at it inverts the window.
+    with pytest.raises(HTTPException) as exc:
+        update_assessment(
+            a.id,
+            schemas.AssessmentUpdate(starts_at=datetime(2026, 5, 20)),
+            u1,
+            db,
+        )
+    assert exc.value.status_code == 400
+    assert db.get(models.Assessment, a.id).starts_at == datetime(2026, 5, 1)
+
+
+def test_update_partial_window_valid_against_stored_value(db):
+    u1 = _company_user(db, 1)
+    c1 = _company(db, u1)
+    a = _assessment(
+        db, c1, starts_at=datetime(2026, 5, 1), ends_at=datetime(2026, 5, 10)
+    )
+
+    result = update_assessment(
+        a.id, schemas.AssessmentUpdate(ends_at=datetime(2026, 5, 20)), u1, db
+    )
+    assert result.ends_at == datetime(2026, 5, 20)
 
 
 # ---------------------------------------------------------------------------

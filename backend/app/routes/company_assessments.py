@@ -1,4 +1,6 @@
 # pyrefly: ignore [missing-import]
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -61,6 +63,43 @@ def _owned_section(
     if section is None:
         raise HTTPException(status_code=404, detail="Section not found")
     return section
+
+
+def _ensure_publishable(db: Session, assessment: models.Assessment) -> None:
+    """Enforce the minimum content needed before an assessment can go live.
+
+    A publishable assessment needs at least one section and at least one
+    question in a question-bearing section (aptitude/technical/coding). An
+    assessment with no sections — or only empty/interview sections — has
+    nothing for a candidate to answer and nothing to score, so publishing it
+    is rejected with a clear 400.
+    """
+    has_section = (
+        db.query(models.AssessmentSection.id)
+        .filter(models.AssessmentSection.assessment_id == assessment.id)
+        .first()
+        is not None
+    )
+    if not has_section:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot publish an assessment without any sections",
+        )
+    has_question = (
+        db.query(models.AssessmentQuestion.id)
+        .join(
+            models.AssessmentSection,
+            models.AssessmentQuestion.section_id == models.AssessmentSection.id,
+        )
+        .filter(models.AssessmentSection.assessment_id == assessment.id)
+        .first()
+        is not None
+    )
+    if not has_question:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot publish an assessment without any questions",
+        )
 
 
 def _section_orders(
@@ -134,12 +173,25 @@ def create_assessment(
     """Company creates an assessment (draft by default)."""
     company = get_company_for_user(db, current_user)
     require_company_approved(company)
+    assessment_status = (
+        payload.status or models.CompanyAssessmentStatusEnum.draft
+    )
+    # A brand-new assessment has no sections yet, so it can never satisfy the
+    # publish requirement; require it to be saved as a draft first.
+    if assessment_status == models.CompanyAssessmentStatusEnum.published:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Cannot publish an assessment without sections and questions; "
+                "save it as a draft first"
+            ),
+        )
     assessment = models.Assessment(
         company_id=company.id,
         title=payload.title,
         description=payload.description,
         instructions=payload.instructions,
-        status=payload.status or models.CompanyAssessmentStatusEnum.draft,
+        status=assessment_status,
         duration_minutes=payload.duration_minutes,
         starts_at=payload.starts_at,
         ends_at=payload.ends_at,
@@ -191,6 +243,31 @@ def update_assessment(
     """Update an assessment the company owns."""
     assessment = _owned_assessment(db, current_user, assessment_id)
     data = payload.model_dump(exclude_unset=True)
+
+    # A partial update must be validated against the stored window, not just
+    # against the fields present in this request (the schema can only see the
+    # pair when both are sent together).
+    merged_starts_at = data.get("starts_at", assessment.starts_at)
+    merged_ends_at = data.get("ends_at", assessment.ends_at)
+    if (
+        merged_starts_at is not None
+        and merged_ends_at is not None
+        and merged_ends_at < merged_starts_at
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ends_at must be on or after starts_at",
+        )
+
+    # Enforce the minimum content only when the update actually publishes the
+    # assessment; editing an already-published or still-draft one is untouched.
+    new_status = data.get("status", assessment.status)
+    if (
+        new_status == models.CompanyAssessmentStatusEnum.published
+        and assessment.status != models.CompanyAssessmentStatusEnum.published
+    ):
+        _ensure_publishable(db, assessment)
+
     for field, value in data.items():
         setattr(assessment, field, value)
     db.commit()
@@ -465,6 +542,21 @@ def assign_candidates(
     partially applied set.
     """
     assessment = _owned_assessment(db, current_user, assessment_id)
+
+    # Candidates may only be assigned to a live assessment: a draft/closed
+    # assessment is not available to candidates, and one whose window has
+    # already ended can no longer be started.
+    if assessment.status != models.CompanyAssessmentStatusEnum.published:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot assign candidates to an assessment that is not published",
+        )
+    if assessment.ends_at is not None and datetime.utcnow() > assessment.ends_at:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot assign candidates to an assessment whose window has ended",
+        )
+
     candidates = _validated_candidates(db, payload.candidate_ids)
 
     existing = (
