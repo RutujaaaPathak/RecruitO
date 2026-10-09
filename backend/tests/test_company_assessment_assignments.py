@@ -88,8 +88,9 @@ def _company(db, user, name="Acme Recruiting", approved=True):
     return c
 
 
-def _assessment(db, company, title="Backend Screening"):
-    a = models.Assessment(company_id=company.id, title=title)
+def _assessment(db, company, title="Backend Screening", **kw):
+    kw.setdefault("status", models.CompanyAssessmentStatusEnum.published)
+    a = models.Assessment(company_id=company.id, title=title, **kw)
     db.add(a)
     db.flush()
     return a
@@ -136,6 +137,67 @@ def test_assign_single_candidate(db):
     assert out.assigned_at is not None
     assert out.started_at is None
     assert out.submitted_at is None
+
+
+def test_assign_to_draft_assessment_rejected(db):
+    owner = _company_user(db, 1)
+    company = _company(db, owner)
+    assessment = _assessment(
+        db, company, status=models.CompanyAssessmentStatusEnum.draft
+    )
+    _user(db, 10)
+
+    with pytest.raises(HTTPException) as exc:
+        assign_candidates(
+            assessment.id, schemas.AssessmentAssignIn(candidate_ids=[10]), owner, db
+        )
+    assert exc.value.status_code == 409
+    assert _assignment_count(db) == 0
+
+
+def test_assign_to_closed_assessment_rejected(db):
+    owner = _company_user(db, 1)
+    company = _company(db, owner)
+    assessment = _assessment(
+        db, company, status=models.CompanyAssessmentStatusEnum.closed
+    )
+    _user(db, 10)
+
+    with pytest.raises(HTTPException) as exc:
+        assign_candidates(
+            assessment.id, schemas.AssessmentAssignIn(candidate_ids=[10]), owner, db
+        )
+    assert exc.value.status_code == 409
+    assert _assignment_count(db) == 0
+
+
+def test_assign_to_ended_window_rejected(db):
+    owner = _company_user(db, 1)
+    company = _company(db, owner)
+    assessment = _assessment(db, company, ends_at=datetime(2020, 1, 1))
+    _user(db, 10)
+
+    with pytest.raises(HTTPException) as exc:
+        assign_candidates(
+            assessment.id, schemas.AssessmentAssignIn(candidate_ids=[10]), owner, db
+        )
+    assert exc.value.status_code == 409
+    assert _assignment_count(db) == 0
+
+
+def test_assign_to_future_window_accepted(db):
+    owner = _company_user(db, 1)
+    company = _company(db, owner)
+    assessment = _assessment(
+        db, company, starts_at=datetime(2099, 1, 1), ends_at=datetime(2099, 2, 1)
+    )
+    _user(db, 10)
+
+    result = assign_candidates(
+        assessment.id, schemas.AssessmentAssignIn(candidate_ids=[10]), owner, db
+    )
+    assert result[0].candidate_id == 10
+    assert _assignment_count(db) == 1
 
 
 def test_assign_multiple_candidates_atomically(db):
