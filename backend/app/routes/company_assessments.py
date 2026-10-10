@@ -48,6 +48,32 @@ def _owned_assessment(
     return assessment
 
 
+def _lock_assessment(
+    db: Session, assessment: models.Assessment
+) -> models.Assessment:
+    """Re-read the assessment row ``FOR UPDATE`` and return the committed state.
+
+    Deletion and candidate assignment both take this lock first, so the two are
+    serialized on the same row and cannot interleave; the lock order is kept
+    consistent (assessment row before assignment rows) to avoid deadlocks. If a
+    transaction that was deleting the assessment committed while this waited,
+    the row is gone here, so callers get a clean 404 instead of acting on stale
+    state. Ownership was already established on the same (immutable-id) row by
+    ``_owned_assessment``. On SQLite the clause is a no-op, but writes there are
+    serialized at the database level anyway.
+    """
+    locked = (
+        db.query(models.Assessment)
+        .filter(models.Assessment.id == assessment.id)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if locked is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    return locked
+
+
 def _owned_section(
     db: Session, assessment: models.Assessment, section_id: int
 ) -> models.AssessmentSection:
@@ -400,6 +426,10 @@ def delete_assessment(
     so an active exam or recorded result can never be destroyed.
     """
     assessment = _owned_assessment(db, current_user, assessment_id)
+    # Take the assessment row lock first (same order as assign_candidates) so a
+    # concurrent assignment cannot slip an INSERT in between the check and the
+    # cascade delete; a row deleted while we waited is gone -> 404.
+    assessment = _lock_assessment(db, assessment)
     _ensure_deletable(db, assessment)
     db.delete(assessment)
     db.commit()
@@ -664,6 +694,10 @@ def assign_candidates(
     partially applied set.
     """
     assessment = _owned_assessment(db, current_user, assessment_id)
+    # Serialize against a concurrent deletion of the same assessment: take the
+    # assessment row lock, then re-check the live state below. If the delete
+    # committed first, the lock finds no row and this returns a clean 404.
+    assessment = _lock_assessment(db, assessment)
 
     # Candidates may only be assigned to a live assessment: a draft/closed
     # assessment is not available to candidates, and one whose window has
