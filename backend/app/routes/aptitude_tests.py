@@ -2,6 +2,7 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.deps import get_db
@@ -9,14 +10,17 @@ from app.auth import RoleChecker
 from app import models, schemas
 from app.services.mock_interview import resolve_interview_context
 from app.services.aptitude_test import (
+    CATEGORIES,
     build_question_row,
     expires_at,
     finalize_test,
     generate_questions,
     is_expired,
+    normalize_section,
     pass_threshold,
     question_count,
     record_answer,
+    section_question_count,
     time_limit_minutes,
 )
 
@@ -144,6 +148,7 @@ def _detail(test: models.AptitudeTest) -> schemas.AptitudeTestDetailOut:
     return schemas.AptitudeTestDetailOut(
         id=test.id,
         application_id=test.application_id,
+        section=test.section or "mixed",
         user_id=test.user_id,
         job_title=job_title,
         company_name=company_name,
@@ -173,6 +178,7 @@ def _list_out(test: models.AptitudeTest) -> schemas.AptitudeTestListOut:
     return schemas.AptitudeTestListOut(
         id=test.id,
         application_id=test.application_id,
+        section=test.section or "mixed",
         job_title=job_title,
         company_name=company_name,
         status=test.status,
@@ -227,6 +233,25 @@ def _finalize_if_expired(
 
 
 # ---------------------------------------------------------------------------
+# Practice-test configuration (shown before a test starts)
+# ---------------------------------------------------------------------------
+
+@router.get("/config", response_model=schemas.AptitudeConfigOut)
+def get_aptitude_config(
+    current_user: models.User = Depends(candidate_only),
+):
+    """Metadata the UI shows before starting: the available sections, the
+    question counts, the time limit and the pass mark."""
+    return schemas.AptitudeConfigOut(
+        sections=list(CATEGORIES),
+        question_count=question_count(),
+        section_question_count=section_question_count(CATEGORIES[0]),
+        time_limit_minutes=time_limit_minutes(),
+        pass_percentage=pass_threshold(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Start an aptitude test
 # ---------------------------------------------------------------------------
 
@@ -236,18 +261,27 @@ def start_aptitude_test(
     current_user: models.User = Depends(candidate_only),
     db: Session = Depends(get_db),
 ):
-    """Start a timed 20-question aptitude test for one of the candidate's
-    applications. Generates the full question set (LLM or fallback bank) and
-    returns the questions WITHOUT their correct answers."""
-    application = _owned_application(db, current_user, payload.application_id)
+    """Start a timed, common aptitude practice test for one section (or all
+    three when ``section`` is "mixed"). Independent of any application. The
+    question set is generated (LLM or fallback bank) and returned WITHOUT the
+    correct answers."""
+    section = normalize_section(payload.section)
 
+    section_cond = (
+        or_(
+            models.AptitudeTest.section == "mixed",
+            models.AptitudeTest.section.is_(None),
+        )
+        if section == "mixed"
+        else models.AptitudeTest.section == section
+    )
     existing = (
         db.query(models.AptitudeTest)
         .filter(
-            models.AptitudeTest.application_id == application.id,
             models.AptitudeTest.user_id == current_user.id,
             models.AptitudeTest.status
             == models.AssessmentStatusEnum.in_progress,
+            section_cond,
         )
         .first()
     )
@@ -255,18 +289,19 @@ def start_aptitude_test(
         raise HTTPException(
             status_code=409,
             detail=(
-                "An aptitude test is already in progress for this application "
+                "An aptitude test is already in progress for this section "
                 f"(test {existing.id}). Resume it instead of starting a new one."
             ),
         )
 
-    ctx = resolve_interview_context(db, current_user, application)
-    total = question_count()
-    generation = generate_questions(ctx, total)
+    ctx = resolve_interview_context(db, current_user, None)
+    total = section_question_count(section)
+    generation = generate_questions(ctx, total, section=section)
 
     test = models.AptitudeTest(
         user_id=current_user.id,
-        application_id=application.id,
+        application_id=None,
+        section=section,
         status=models.AssessmentStatusEnum.in_progress,
         total_questions=total,
         time_limit_minutes=time_limit_minutes(),

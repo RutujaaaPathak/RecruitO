@@ -863,11 +863,14 @@ class CodingSubmission(Base):
 # Aptitude Test: tests + questions + answers
 # -----------------------------
 class AptitudeTest(Base):
-    """One timed, 20-question aptitude test anchored to a candidate's
-    application (and therefore a job). Questions span three fixed sections —
-    quantitative, logical reasoning and verbal — and are generated per-attempt
-    by the LLM (grounded in the candidate's resume + job) or by a deterministic
-    fallback question bank. The correct answer is persisted server-side only.
+    """One timed, self-contained aptitude practice test for a candidate.
+
+    Mock Practice tests are *common*: they are independent of any company, job
+    or application, so ``application_id`` is nullable. Each test targets one
+    ``section`` — "mixed" (all three) or a single one of "quantitative",
+    "logical_reasoning" and "verbal" — and questions are generated per-attempt
+    by the LLM (kept generic) or by a deterministic fallback question bank. The
+    correct answer is persisted server-side only.
 
     Reuses AssessmentStatusEnum (in_progress | completed) so the shared
     PostgreSQL enum type stays a single source of truth across assessments.
@@ -877,8 +880,13 @@ class AptitudeTest(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    # Nullable: a common practice test is not tied to any application/company.
     application_id = Column(
-        Integer, ForeignKey("applications.id"), nullable=False, index=True
+        Integer, ForeignKey("applications.id"), nullable=True, index=True
+    )
+    # "mixed" | "quantitative" | "logical_reasoning" | "verbal".
+    section = Column(
+        String, nullable=False, default="mixed", server_default="mixed"
     )
     status = Column(
         Enum(AssessmentStatusEnum, name="assessmentstatusenum"),
