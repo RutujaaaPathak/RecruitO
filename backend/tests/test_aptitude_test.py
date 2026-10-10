@@ -4,7 +4,7 @@ duplicate submissions), RBAC/ownership, and answer security (the correct answer
 is never serialized) — hermetic, no DB / API.
 """
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,6 +40,7 @@ from app.services.aptitude_test import (  # noqa: E402
     EXPIRY_NOTICE,
     FALLBACK_NOTICE,
     APTITUDE_SYSTEM_PROMPT,
+    MIXED,
     build_answer_row,
     build_generation_prompt,
     build_question_row,
@@ -50,10 +51,13 @@ from app.services.aptitude_test import (  # noqa: E402
     finalize_test,
     generate_questions,
     is_expired,
+    normalize_section,
     parse_generation_json,
     pass_threshold,
     question_count,
     record_answer,
+    section_pool,
+    section_question_count,
     time_limit_minutes,
 )
 
@@ -878,3 +882,133 @@ def test_selected_map_returns_candidate_selection_by_question():
     test = _in_progress_test()
     selected = _selected_map(test)
     assert selected == {10: 1}
+
+
+# ---------------------------------------------------------------------------
+# Common practice tests: section selection + start-to-first-question
+# ---------------------------------------------------------------------------
+
+def test_normalize_section_coerces_variants_to_valid_sections():
+    assert normalize_section("mixed") == MIXED
+    assert normalize_section("Mixed Test") == MIXED
+    assert normalize_section("all") == MIXED
+    assert normalize_section("") == MIXED
+    assert normalize_section("quantitative") == "quantitative"
+    assert normalize_section("quants") == "quantitative"
+    assert normalize_section("Math") == "quantitative"
+    assert normalize_section("Logical Reasoning") == "logical_reasoning"
+    assert normalize_section("logic") == "logical_reasoning"
+    assert normalize_section("english") == "verbal"
+    assert normalize_section("vocabulary") == "verbal"
+    assert normalize_section("not-a-section") == MIXED
+
+
+def test_section_question_count_mixed_uses_default_but_section_is_capped():
+    assert section_question_count("mixed") == question_count() == DEFAULT_QUESTION_COUNT
+    single_count = section_question_count("quantitative")
+    assert 0 < single_count <= question_count()
+    assert single_count == min(question_count(), len(section_pool("quantitative")))
+    assert section_question_count("bogus") == question_count()
+
+
+def test_fallback_question_at_single_section_only_uses_that_section():
+    for index in range(6):
+        q = fallback_question_at(index, section="verbal")
+        assert q["category"] == "verbal"
+        assert q in section_pool("verbal") or any(
+            p["question"] == q["question"] for p in section_pool("verbal")
+        )
+    # Cycling more than the pool still stays within the section.
+    q = fallback_question_at(12, section="logical_reasoning")
+    assert q["category"] == "logical_reasoning"
+
+
+def test_generate_questions_single_section_filters_llm_and_pads_from_section():
+    def fake_llm(prompt, system=None):
+        assert "every question must be 'quantitative'" in prompt
+        assert "Do NOT use any other category" in prompt
+        # The model ignores the instruction and mixes categories on purpose.
+        return {
+            "questions": [
+                _llm_item(category=c)
+                for c in ("quantitative", "logical_reasoning", "verbal")
+            ]
+            * 7
+        }
+
+    result = generate_questions(_ctx(), 6, section="quantitative", llm_call=fake_llm)
+    assert len(result["questions"]) == 6
+    assert all(q["category"] == "quantitative" for q in result["questions"])
+    assert [q["question_index"] for q in result["questions"]] == list(range(6))
+
+    # The bank fill keeps the single-section guarantee too.
+    result = generate_questions(_ctx(), 6, section="verbal", llm_call=fake_llm)
+    assert all(q["category"] == "verbal" for q in result["questions"])
+
+
+def test_mixed_generation_still_rotates_all_sections():
+    def broken(prompt, system=None):
+        raise RuntimeError("no key")
+
+    result = generate_questions(_ctx(), 6, section=MIXED, llm_call=broken)
+    assert all(q["generated_by"] == "fallback" for q in result["questions"])
+    assert [q["category"] for q in result["questions"]] == (
+        CATEGORIES * (6 // len(CATEGORIES) + 1)
+    )[:6]
+
+
+def test_build_generation_prompt_requests_single_section():
+    prompt = build_generation_prompt(_ctx(), 6, section="logical_reasoning")
+    assert "every question must be 'logical_reasoning'" in prompt
+    assert "quantitative, logical_reasoning, verbal" not in prompt
+
+
+def test_started_test_detail_lands_candidate_on_first_question_with_future_deadline():
+    """Regression guard for the 'Start Test shows score 0' bug.
+
+    A freshly started test must (a) stay in_progress with no results, (b) point
+    the candidate at question 0 first, and (c) expose an expires_at strictly in
+    the future (started_at + time limit) so a UTC-aware client countdown never
+    auto-submits an empty attempt the moment a test starts.
+    """
+    started = datetime(2026, 1, 1, 10, 0, 0)
+    test = _test(
+        id=50,
+        total_questions=2,
+        started_at=started,
+        time_limit_minutes=20,
+    )
+    q0 = _question(100, 0, correct=1, category="quantitative")
+    q1 = _question(101, 1, correct=0, category="verbal")
+    test.questions = [q0, q1]
+    test.answers = []
+
+    detail = _detail(test)
+
+    assert detail.status == AssessmentStatusEnum.in_progress
+    assert detail.results is None
+    assert detail.section == MIXED  # legacy/default rows serialize as mixed
+    assert detail.total_questions == 2
+    assert detail.questions[0].id == q0.id
+    assert detail.questions[0].question_index == 0  # candidate sees Q1 first
+    # Deadline is derived from the backend clock (naive UTC), never the past.
+    assert detail.expires_at == started + timedelta(minutes=20)
+    assert detail.expires_at > started
+
+    payload = detail.model_dump_json()
+    # Serialized without a UTC offset — the client parses it AS UTC (see
+    # frontend/src/lib/datetime.ts) so the countdown is positive at start.
+    assert "2026-01-01T10:20:00" in payload
+    assert payload.count("Z") == 0
+
+
+def test_common_detail_and_list_carry_section_label():
+    test = _test(id=51, section="quantitative", application_id=None)
+    detail = _detail(test)
+    assert detail.section == "quantitative"
+    assert detail.application_id is None  # common tests carry no application
+
+    from app.routes.aptitude_tests import _list_out
+
+    item = _list_out(test)
+    assert item.section == "quantitative"

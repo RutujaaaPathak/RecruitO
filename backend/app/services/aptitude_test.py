@@ -1,10 +1,11 @@
 # pyrefly: ignore [missing-import]
-"""Aptitude Test service: timed multiple-choice aptitude tests for candidates.
+"""Aptitude Test service: timed multiple-choice practice tests for candidates.
 
 Mirrors the AI MCQ assessment architecture (see ``app/services/mcq_assessment.py``)
-and reuses its generic deadline + scoring helpers. Runs a 20-minute, 20-question
-aptitude test against one of the candidate's applications. Questions span three
-fixed sections — quantitative, logical reasoning and verbal — generated
+and reuses its generic deadline + scoring helpers. Runs a 20-minute practice
+test that is independent of any company/job/application: the candidate picks a
+``section`` ("mixed" for all three, or a single one) and questions span the
+three fixed sections — quantitative, logical reasoning and verbal — generated
 per-attempt either by the LLM or by a deterministic fallback question bank, so
 the feature always works even without an LLM key.
 
@@ -34,6 +35,11 @@ from app.services.mcq_assessment import (
 
 # Question rotation, in this exact order for every test.
 CATEGORIES = ["quantitative", "logical_reasoning", "verbal"]
+
+# A common practice test targets one section; "mixed" spans all three.
+MIXED = "mixed"
+SECTIONS = list(CATEGORIES)
+VALID_SECTIONS = SECTIONS + [MIXED]
 
 DEFAULT_QUESTION_COUNT = 20
 DEFAULT_TIME_LIMIT_MINUTES = 20
@@ -103,6 +109,39 @@ def pass_threshold() -> int:
 def category_for_index(index: int) -> str:
     """Rotating category for a zero-based question index (round-robin)."""
     return CATEGORIES[index % len(CATEGORIES)]
+
+
+def normalize_section(value: Any) -> str:
+    """Coerce arbitrary input to a valid section ("mixed" is the default)."""
+    raw = _coerce_str(value).lower().replace(" ", "_").replace("-", "_")
+    if raw in ("", "mixed", "all", "full", "common", "both"):
+        return MIXED
+    if raw in ("quantitative", "quant", "math", "arithmetic", "quants"):
+        return "quantitative"
+    if raw in ("logical_reasoning", "logical", "reasoning", "logic"):
+        return "logical_reasoning"
+    if raw in ("verbal", "english", "vocabulary", "language"):
+        return "verbal"
+    return MIXED
+
+
+def section_pool(section: str) -> List[Dict[str, Any]]:
+    """Fallback-bank questions available for a single section."""
+    section = normalize_section(section)
+    if section == MIXED:
+        return list(_FALLBACK_BANK)
+    pool = [q for q in _FALLBACK_BANK if q["category"] == section]
+    return pool or list(_FALLBACK_BANK)
+
+
+def section_question_count(section: str) -> int:
+    """Question count for a section: the configured total for "mixed",
+    otherwise capped at the number of distinct bank questions in the section so
+    a section quiz never repeats a question."""
+    section = normalize_section(section)
+    if section == MIXED:
+        return question_count()
+    return max(1, min(question_count(), len(section_pool(section))))
 
 
 # ---------------------------------------------------------------------------
@@ -179,9 +218,19 @@ def _coerce_correct_index(raw: Any) -> Optional[int]:
 # Prompt building
 # ---------------------------------------------------------------------------
 
-def build_generation_prompt(ctx: Any, total: int) -> str:
+def build_generation_prompt(ctx: Any, total: int, section: str = MIXED) -> str:
     """Compose the prompt that produces ALL questions for one test."""
-    rotation = ", ".join(CATEGORIES)
+    section = normalize_section(section)
+    if section == MIXED:
+        scope = (
+            "CATEGORY ROTATION (repeat in this order): "
+            + ", ".join(CATEGORIES)
+        )
+    else:
+        scope = (
+            f"CATEGORY: every question must be '{section}'. Do NOT use any "
+            "other category."
+        )
     return f"""SUPPLIED CONTEXT (role only — never factually associate questions with
 the candidate's personal data):
 
@@ -189,7 +238,7 @@ the candidate's personal data):
 
 NUMBER OF QUESTIONS: {total}
 
-CATEGORY ROTATION (repeat in this order): {rotation}
+{scope}
 
 Now produce the questions JSON."""
 
@@ -365,10 +414,20 @@ _FALLBACK_BANK: List[Dict[str, Any]] = [
 ]
 
 
-def fallback_question_at(index: int) -> Dict[str, Any]:
-    """Deterministic bank question for a zero-based index (cycles the bank)."""
-    item = dict(_FALLBACK_BANK[index % len(_FALLBACK_BANK)])
-    item["category"] = category_for_index(index)
+def fallback_question_at(index: int, section: str = MIXED) -> Dict[str, Any]:
+    """Deterministic bank question for a zero-based index.
+
+    Mixed tests rotate across the three categories; a single-section test draws
+    only from that section's questions (cycling if the section is exhausted).
+    """
+    section = normalize_section(section)
+    if section == MIXED:
+        item = dict(_FALLBACK_BANK[index % len(_FALLBACK_BANK)])
+        item["category"] = category_for_index(index)
+    else:
+        pool = section_pool(section)
+        item = dict(pool[index % len(pool)])
+        item["category"] = section
     return item
 
 
@@ -376,8 +435,17 @@ def fallback_question_at(index: int) -> Dict[str, Any]:
 # Question generation orchestration (LLM with deterministic fallback)
 # ---------------------------------------------------------------------------
 
-def generate_questions(ctx: Any, total: int, llm_call=None) -> Dict[str, Any]:
+def generate_questions(
+    ctx: Any,
+    total: int,
+    section: str = MIXED,
+    llm_call=None,
+) -> Dict[str, Any]:
     """Generate exactly ``total`` question dicts; returns metadata too.
+
+    ``section`` is "mixed" (all three categories) or a single category. LLM
+    output is filtered to the section; any shortfall is padded from the
+    deterministic bank so the test is always full.
 
     Result shape:
     {
@@ -388,17 +456,22 @@ def generate_questions(ctx: Any, total: int, llm_call=None) -> Dict[str, Any]:
       "notice": Optional[str],
     }
     """
+    section = normalize_section(section)
     if llm_call is None:
         llm_call = llm_client.generate_json
 
     parsed: List[Dict[str, Any]] = []
     notice: Optional[str] = None
     try:
-        prompt = build_generation_prompt(ctx, total)
+        prompt = build_generation_prompt(ctx, total, section)
         raw = llm_call(prompt, system=APTITUDE_SYSTEM_PROMPT)
         parsed = parse_generation_json(raw, total)
     except Exception as exc:  # noqa: BLE001 - degrade gracefully, like mock interview
         notice = f"{FALLBACK_NOTICE} ({_safe_reason(exc)})"
+
+    # A single-section quiz keeps only that section's LLM questions.
+    if section != MIXED and parsed:
+        parsed = [q for q in parsed if q["category"] == section]
 
     questions: List[Dict[str, Any]] = []
     llm_count = 0
@@ -413,7 +486,7 @@ def generate_questions(ctx: Any, total: int, llm_call=None) -> Dict[str, Any]:
 
     # Pad any shortfall from the deterministic bank so the test is always full.
     for index in range(len(questions), total):
-        fq = fallback_question_at(index)
+        fq = fallback_question_at(index, section)
         fq["question_index"] = index
         fq["generated_by"] = "fallback"
         fq["notice"] = notice or FALLBACK_NOTICE

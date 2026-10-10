@@ -12,6 +12,9 @@ import {
 } from "recharts";
 import {
   ArrowLeft,
+  BookOpen,
+  Brain,
+  Calculator,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -19,6 +22,7 @@ import {
   Clock,
   FileText,
   HelpCircle,
+  Layers,
   Loader2,
   Play,
   RotateCcw,
@@ -29,6 +33,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api } from "../../lib/api";
+import { apiTime, parseApiDate } from "../../lib/datetime";
 
 // ---------------------------------------------------------------------------
 // Backend response shapes (mirror backend/app/schemas.py)
@@ -71,7 +76,8 @@ interface AptitudeResultsOut {
 
 interface AptitudeTestListOut {
   id: number;
-  application_id: number;
+  application_id: number | null;
+  section: string;
   job_title: string | null;
   company_name: string | null;
   status: "in_progress" | "completed";
@@ -89,7 +95,8 @@ interface AptitudeTestListOut {
 
 interface AptitudeTestDetailOut {
   id: number;
-  application_id: number;
+  application_id: number | null;
+  section: string;
   user_id: number;
   job_title: string | null;
   company_name: string | null;
@@ -109,14 +116,12 @@ interface AptitudeTestDetailOut {
   updated_at: string;
 }
 
-interface ApplicationData {
-  id: number;
-  job_id: number;
-  status: string;
-  match_score: number | null;
-  created_at: string;
-  job_title: string | null;
-  company_name: string | null;
+interface AptitudeConfigOut {
+  sections: string[];
+  question_count: number;
+  section_question_count: number;
+  time_limit_minutes: number;
+  pass_percentage: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,9 +144,76 @@ function errMessage(e: unknown, fallback: string): string {
   return e instanceof Error ? e.message : fallback;
 }
 
+interface SectionCard {
+  key: string;
+  title: string;
+  tagline: string;
+  description: string;
+  icon: typeof Calculator;
+  gradient: string;
+  iconColor: string;
+  glow: string;
+}
+
+// The four practice modes: the three aptitude sections plus a mixed test.
+const SECTION_CARDS: SectionCard[] = [
+  {
+    key: "quantitative",
+    title: "Quantitative Aptitude",
+    tagline: "Numbers & arithmetic",
+    description:
+      "Percentages, ratios, averages, speed, profit & loss and mental math.",
+    icon: Calculator,
+    gradient: "from-violet-600/20 to-blue-600/10",
+    iconColor: "text-violet-400",
+    glow: "group-hover:shadow-[0_20px_60px_rgba(139,92,246,0.25)] group-hover:ring-violet-500/30",
+  },
+  {
+    key: "logical_reasoning",
+    title: "Logical Reasoning",
+    tagline: "Patterns & puzzles",
+    description:
+      "Sequences, coding-decoding, odd-one-out, clock angles and verbal logic.",
+    icon: Brain,
+    gradient: "from-blue-600/20 to-cyan-500/10",
+    iconColor: "text-cyan-400",
+    glow: "group-hover:shadow-[0_20px_60px_rgba(59,130,246,0.25)] group-hover:ring-blue-400/30",
+  },
+  {
+    key: "verbal",
+    title: "Verbal Ability",
+    tagline: "English language",
+    description:
+      "Synonyms, antonyms, grammar, spelling and sentence-level usage.",
+    icon: BookOpen,
+    gradient: "from-emerald-600/20 to-teal-500/10",
+    iconColor: "text-emerald-400",
+    glow: "group-hover:shadow-[0_20px_60px_rgba(16,185,129,0.25)] group-hover:ring-emerald-400/30",
+  },
+  {
+    key: "mixed",
+    title: "Full Mixed Test",
+    tagline: "All three sections",
+    description:
+      "Quantitative, logical reasoning and verbal in a single timed test.",
+    icon: Layers,
+    gradient: "from-amber-600/20 to-orange-500/10",
+    iconColor: "text-amber-400",
+    glow: "group-hover:shadow-[0_20px_60px_rgba(245,158,11,0.25)] group-hover:ring-amber-400/30",
+  },
+];
+
+function sectionTitle(section: string | null | undefined): string {
+  const key = section || "mixed";
+  return (
+    SECTION_CARDS.find((card) => card.key === key)?.title ?? "Aptitude Test"
+  );
+}
+
 function formatDate(iso: string | null): string {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleDateString(undefined, {
+  const date = parseApiDate(iso);
+  if (!date) return "—";
+  return date.toLocaleDateString(undefined, {
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -180,7 +252,7 @@ type View = "loading" | "home" | "active" | "results";
 export default function AptitudeTest() {
   const [view, setView] = useState<View>("loading");
 
-  const [apps, setApps] = useState<ApplicationData[]>([]);
+  const [config, setConfig] = useState<AptitudeConfigOut | null>(null);
   const [tests, setTests] = useState<AptitudeTestListOut[]>([]);
   const [detail, setDetail] = useState<AptitudeTestDetailOut | null>(null);
   const [results, setResults] = useState<AptitudeResultsOut | null>(null);
@@ -188,7 +260,7 @@ export default function AptitudeTest() {
   const [initError, setInitError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const [startingId, setStartingId] = useState<number | null>(null);
+  const [startingSection, setStartingSection] = useState<string | null>(null);
   const [resumingId, setResumingId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [viewingId, setViewingId] = useState<number | null>(null);
@@ -255,13 +327,13 @@ export default function AptitudeTest() {
     const init = async (): Promise<void> => {
       setInitError(null);
       try {
-        const [appsData, testsData] = await Promise.all([
-          api.get<ApplicationData[]>("/applications"),
+        const [testsData, configData] = await Promise.all([
           api.get<AptitudeTestListOut[]>("/aptitude-tests"),
+          api.get<AptitudeConfigOut>("/aptitude-tests/config"),
         ]);
         if (cancelled) return;
-        setApps(appsData);
         setTests(testsData);
+        setConfig(configData);
 
         const inProgress = testsData.filter(
           (t) => t.status === "in_progress"
@@ -289,16 +361,17 @@ export default function AptitudeTest() {
   // Actions
   // -------------------------------------------------------------------------
 
-  const startTest = async (appId: number): Promise<void> => {
+  const startTest = async (section: string): Promise<void> => {
     autoSubmittedRef.current = false;
-    setStartingId(appId);
+    setStartingSection(section);
     setActionError(null);
     try {
       const data = await api.post<AptitudeTestDetailOut>("/aptitude-tests", {
-        application_id: appId,
+        section,
       });
       setDetail(data);
       setSelections({});
+      // Land the candidate on the FIRST question; never on a zero-score page.
       setCurrentIndex(data.questions[0]?.question_index ?? 0);
       setResults(null);
       setTests((prev) => [listOutFromDetail(data), ...prev]);
@@ -307,7 +380,7 @@ export default function AptitudeTest() {
       setActionError(errMessage(e, "Failed to start the aptitude test"));
       await refreshTests();
     } finally {
-      setStartingId(null);
+      setStartingSection(null);
     }
   };
 
@@ -451,9 +524,12 @@ export default function AptitudeTest() {
     if (view !== "active" || !detail?.expires_at) return;
 
     const tick = (): void => {
-      const remaining = Math.floor(
-        (new Date(detail.expires_at as string).getTime() - Date.now()) / 1000
-      );
+      // expires_at is serialized as naive UTC by the backend; parseApiDate/app
+      // treat it as the UTC instant it is, so the countdown can never look
+      // already-expired (which used to auto-submit a 0-score test at start).
+      const deadlineMs = apiTime(detail.expires_at);
+      const remaining =
+        deadlineMs == null ? 0 : Math.floor((deadlineMs - Date.now()) / 1000);
       setTimerLeft(remaining);
       if (
         remaining <= 0 &&
@@ -473,11 +549,14 @@ export default function AptitudeTest() {
   // Derived state
   // -------------------------------------------------------------------------
 
-  const inProgressByApp = useMemo(() => {
-    const map: Record<number, AptitudeTestListOut> = {};
+  const inProgressBySection = useMemo(() => {
+    const map: Record<string, AptitudeTestListOut> = {};
     tests.forEach((t) => {
-      if (t.status === "in_progress" && !map[t.application_id]) {
-        map[t.application_id] = t;
+      if (t.status === "in_progress") {
+        const key = t.section || "mixed";
+        if (!map[key]) {
+          map[key] = t;
+        }
       }
     });
     return map;
@@ -538,10 +617,11 @@ export default function AptitudeTest() {
             <ClipboardList size={32} className="text-violet-400" />
             Aptitude Test
           </h1>
-          <p className="text-white/50 mt-2">
-            Take a timed, 20-question aptitude test covering Quantitative,
-            Logical Reasoning and Verbal sections. Correct answers stay hidden
-            until you submit.
+          <p className="text-white/50 mt-2 max-w-2xl">
+            Practice aptitude for career readiness — a common test independent
+            of any job or company. Pick one section to focus on, or take a
+            mixed test covering Quantitative, Logical Reasoning and Verbal.
+            Correct answers stay hidden until you submit.
           </p>
         </div>
       </div>
@@ -562,11 +642,10 @@ export default function AptitudeTest() {
                 className="p-5 rounded-2xl bg-white/5 border border-white/10 flex flex-wrap items-center justify-between gap-4"
               >
                 <div>
-                  <p className="font-semibold">{t.job_title || "Role"}</p>
+                  <p className="font-semibold">{sectionTitle(t.section)}</p>
                   <p className="text-white/50 text-sm">
-                    {t.company_name || "Company"}{" "}
                     <span className="text-white/30">
-                      • {t.time_limit_minutes} min limit
+                      {t.time_limit_minutes} min limit
                     </span>
                   </p>
                   <p className="text-white/40 text-xs mt-1">
@@ -592,78 +671,115 @@ export default function AptitudeTest() {
         </div>
       )}
 
-      {/* APPLICATIONS */}
+      {/* INSTRUCTIONS */}
+      <div className="p-6 rounded-3xl bg-white/5 border border-white/10">
+        <h2 className="text-xl font-semibold mb-3 flex items-center gap-2">
+          <HelpCircle size={18} className="text-violet-300" /> Before you start
+        </h2>
+        <ul className="text-white/60 text-sm space-y-2 list-disc pl-5">
+          <li>
+            Time limit:{" "}
+            <span className="text-white font-medium">
+              {config?.time_limit_minutes ?? 20} minutes per test.
+            </span>
+          </li>
+          <li>
+            {config
+              ? `${config.question_count} questions in a mixed test; each single section has up to ${config.section_question_count} questions.`
+              : "Each test is a timed multiple-choice quiz."}
+          </li>
+          <li>
+            You need at least{" "}
+            <span className="text-white font-medium">
+              {config?.pass_percentage ?? 60}%
+            </span>{" "}
+            to pass.
+          </li>
+          <li>
+            Your answers are saved as you move between questions; you can change
+            them until you submit.
+          </li>
+          <li>The test is auto-submitted when the timer runs out.</li>
+        </ul>
+      </div>
+
+      {/* PRACTICE MODES */}
       <div>
-        <h2 className="text-2xl font-semibold mb-4">Pick an application</h2>
-        {apps.length === 0 ? (
-          <p className="text-white/50">
-            You don't have any applications yet. Apply to a job first so you
-            can take an aptitude test for it.
-          </p>
-        ) : (
-          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
-            {apps.map((app, index) => {
-              const inProgress = inProgressByApp[app.id];
-              const isStarting = startingId === app.id;
-              return (
-                <motion.div
-                  key={app.id}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: index * 0.05 }}
-                  className="p-6 rounded-2xl bg-white/5 border border-white/10 hover:bg-white/10 transition flex flex-col gap-3"
-                >
-                  <div>
-                    <h3 className="text-lg font-semibold">
-                      {app.job_title || "Role"}
-                    </h3>
-                    <p className="text-white/60 text-sm">
-                      {app.company_name || "Company"}
-                    </p>
-                    <p className="text-white/40 text-xs mt-1">
-                      Applied {formatDate(app.created_at)}
-                      {app.match_score != null ? ` • ATS ${app.match_score}%` : ""}
-                    </p>
+        <h2 className="text-2xl font-semibold mb-4">Choose a test</h2>
+        <div className="grid md:grid-cols-2 gap-5">
+          {SECTION_CARDS.map((card) => {
+            const Icon = card.icon;
+            const inProgress = inProgressBySection[card.key];
+            const isStarting = startingSection === card.key;
+            const sectionQuestionCount =
+              card.key === "mixed"
+                ? config?.question_count
+                : config?.section_question_count;
+            return (
+              <motion.div
+                key={card.key}
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className={`p-6 rounded-2xl bg-gradient-to-br ${card.gradient} border border-white/10 transition flex flex-col gap-3`}
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="p-3 rounded-2xl bg-white/10 border border-white/10">
+                    <Icon size={24} className={card.iconColor} />
                   </div>
-                  {inProgress ? (
-                    <div className="flex items-center justify-between mt-auto">
-                      <span className="text-xs text-violet-300 flex items-center gap-1.5">
-                        <Clock size={12} /> In progress
-                      </span>
-                      <Button
-                        size="sm"
-                        onClick={() => void resumeTest(inProgress.id)}
-                        disabled={resumingId === inProgress.id}
-                        className="bg-gradient-to-r from-violet-600 to-blue-600 text-white"
-                      >
-                        {resumingId === inProgress.id ? (
-                          <Loader2 size={14} className="animate-spin" />
-                        ) : (
-                          <Play size={14} />
-                        )}
-                        Resume
-                      </Button>
-                    </div>
-                  ) : (
+                  <span className="text-xs px-2.5 py-1 rounded-full bg-white/10 border border-white/10 text-white/70 whitespace-nowrap">
+                    {sectionQuestionCount
+                      ? `${sectionQuestionCount} questions`
+                      : "Timed test"}{" "}
+                    • {config?.time_limit_minutes ?? 20} min
+                  </span>
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold">{card.title}</h3>
+                  <p className="text-white/40 text-xs uppercase tracking-wider mt-0.5">
+                    {card.tagline}
+                  </p>
+                  <p className="text-white/50 text-sm mt-2 leading-relaxed">
+                    {card.description}
+                  </p>
+                </div>
+                {inProgress ? (
+                  <div className="flex items-center justify-between mt-auto">
+                    <span className="text-xs text-white/60 flex items-center gap-1.5">
+                      <Clock size={12} /> In progress
+                    </span>
                     <Button
                       size="sm"
-                      onClick={() => void startTest(app.id)}
-                      disabled={isStarting}
-                      className="bg-gradient-to-r from-violet-600 to-blue-600 text-white mt-auto"
+                      onClick={() => void resumeTest(inProgress.id)}
+                      disabled={resumingId === inProgress.id}
+                      className="bg-gradient-to-r from-violet-600 to-blue-600 text-white"
                     >
-                      {isStarting ? (
+                      {resumingId === inProgress.id ? (
                         <Loader2 size={14} className="animate-spin" />
                       ) : (
                         <Play size={14} />
                       )}
-                      Start Test
+                      Resume
                     </Button>
-                  )}
-                </motion.div>
-              );
-            })}
-          </div>
-        )}
+                  </div>
+                ) : (
+                  <Button
+                    size="sm"
+                    onClick={() => void startTest(card.key)}
+                    disabled={isStarting}
+                    className="bg-gradient-to-r from-violet-600 to-blue-600 text-white mt-auto"
+                  >
+                    {isStarting ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Play size={14} />
+                    )}
+                    Start Test
+                  </Button>
+                )}
+              </motion.div>
+            );
+          })}
+        </div>
       </div>
 
       {/* PAST ATTEMPTS */}
@@ -683,12 +799,7 @@ export default function AptitudeTest() {
                 className="p-5 rounded-2xl bg-white/5 border border-white/10 flex flex-wrap items-center justify-between gap-4"
               >
                 <div>
-                  <p className="font-semibold">
-                    {t.job_title || "Role"}
-                    <span className="ml-2 text-white/40 text-sm font-normal">
-                      {t.company_name || "Company"}
-                    </span>
-                  </p>
+                  <p className="font-semibold">{sectionTitle(t.section)}</p>
                   <p className="text-white/40 text-xs mt-1">
                     {t.total_questions} questions • completed{" "}
                     {formatDate(t.completed_at)}
@@ -781,9 +892,8 @@ export default function AptitudeTest() {
 
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold">{detail.job_title || "Role"}</h1>
+            <h1 className="text-3xl font-bold">{sectionTitle(detail.section)}</h1>
             <p className="text-white/50 mt-1">
-              {detail.company_name || "Company"} •{" "}
               {detail.time_limit_minutes} minute timer
             </p>
           </div>
@@ -968,7 +1078,7 @@ export default function AptitudeTest() {
               <Trophy size={32} className="text-yellow-400" /> Test Result
             </h1>
             <p className="text-white/50 mt-2">
-              {detail?.job_title || "Role"} · {detail?.company_name || "Company"}
+              {sectionTitle(detail?.section)} · Aptitude Practice
             </p>
           </div>
           {res && (
@@ -1010,8 +1120,8 @@ export default function AptitudeTest() {
             {res.used_fallback && (
               <div className="p-4 rounded-xl bg-white/5 border border-white/10 text-white/60 text-sm">
                 {res.generated_by === "llm"
-                  ? "This aptitude test was generated by the AI model."
-                  : "These questions came from the fallback question bank because the AI service was unavailable."}
+                  ? "This practice test was generated by the AI model."
+                  : "These practice questions come from the built-in aptitude question bank."}
                 {res.notice ? ` ${res.notice}` : ""}
               </div>
             )}
@@ -1149,6 +1259,7 @@ function listOutFromDetail(detail: AptitudeTestDetailOut): AptitudeTestListOut {
   return {
     id: detail.id,
     application_id: detail.application_id,
+    section: detail.section,
     job_title: detail.job_title,
     company_name: detail.company_name,
     status: detail.status,

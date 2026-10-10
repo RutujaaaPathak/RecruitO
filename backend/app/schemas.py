@@ -668,8 +668,29 @@ class CodingTestDetailOut(BaseModel):
 # -----------------------------
 # Aptitude Test
 # -----------------------------
+# A common practice test: "mixed" spans all three sections, otherwise it is a
+# single-section quiz.
+AptitudeSection = Literal["mixed", "quantitative", "logical_reasoning", "verbal"]
+
+
 class AptitudeTestStartIn(BaseModel):
-    application_id: int
+    """Start a common aptitude practice test.
+
+    No application/company/job is involved: the candidate only picks the
+    ``section`` to practise ("mixed" covers all three).
+    """
+
+    section: AptitudeSection = "mixed"
+
+
+class AptitudeConfigOut(BaseModel):
+    """Practice-test metadata the UI shows *before* a test starts."""
+
+    sections: List[str] = []
+    question_count: int
+    section_question_count: int
+    time_limit_minutes: int
+    pass_percentage: int
 
 
 class AptitudeAnswerIn(BaseModel):
@@ -721,7 +742,8 @@ class AptitudeResultsOut(BaseModel):
 
 class AptitudeTestListOut(BaseModel):
     id: int
-    application_id: int
+    application_id: Optional[int] = None
+    section: str = "mixed"
     job_title: Optional[str] = None
     company_name: Optional[str] = None
     status: AssessmentStatusEnum
@@ -739,7 +761,8 @@ class AptitudeTestListOut(BaseModel):
 
 class AptitudeTestDetailOut(BaseModel):
     id: int
-    application_id: int
+    application_id: Optional[int] = None
+    section: str = "mixed"
     user_id: int
     job_title: Optional[str] = None
     company_name: Optional[str] = None
