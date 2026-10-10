@@ -116,6 +116,68 @@ def _section_orders(
     ]
 
 
+def _assignment_statuses(
+    db: Session, assessment_id: int
+) -> set[models.AssessmentAssignmentStatusEnum]:
+    """The distinct statuses of the assessment's candidate assignments.
+
+    An empty set means nobody has been assigned yet, so nothing depends on the
+    current content or window.
+    """
+    return {
+        row[0]
+        for row in (
+            db.query(models.AssessmentAssignment.status)
+            .filter(models.AssessmentAssignment.assessment_id == assessment_id)
+            .all()
+        )
+    }
+
+
+def _ensure_paper_editable(db: Session, assessment: models.Assessment) -> None:
+    """Freeze the paper (sections + questions) once any candidate has started
+    or submitted an attempt.
+
+    The paper is the exam candidates see while attempting and the source from
+    which results are derived on read. Editing it after the first start would
+    change the in-flight exam; editing it after a submission would silently
+    rewrite stored results. Drafts, unpublished or published-but-unassigned
+    assessments, and assessments whose candidates have only been assigned (not
+    started yet) stay fully editable — nobody has taken the exam, so nothing
+    depends on the content.
+    """
+    statuses = _assignment_statuses(db, assessment.id)
+    if (
+        models.AssessmentAssignmentStatusEnum.in_progress in statuses
+        or models.AssessmentAssignmentStatusEnum.submitted in statuses
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Cannot change assessment content once candidates have started "
+                "or submitted the assessment"
+            ),
+        )
+
+
+def _ensure_window_editable(db: Session, assessment: models.Assessment) -> None:
+    """Freeze the duration / availability window while an attempt is active.
+
+    The attempt deadline is derived live from ``duration_minutes`` and
+    ``ends_at`` (deadline = min(start + duration, window end)); changing either
+    mid-attempt would retroactively shrink or stretch a candidate's deadline.
+    """
+    statuses = _assignment_statuses(db, assessment.id)
+    if models.AssessmentAssignmentStatusEnum.in_progress in statuses:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Cannot change the assessment duration or window while an "
+                "attempt is in progress"
+            ),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------------
@@ -259,6 +321,17 @@ def update_assessment(
             detail="ends_at must be on or after starts_at",
         )
 
+    # The attempt deadline is derived live from the duration and window, so
+    # once an attempt is in progress those fields must not move: shrinking the
+    # duration or pulling ends_at forward would expire an active attempt early,
+    # and stretching them would retroactively grant extra time.
+    window_changed = any(
+        field in data and data[field] != getattr(assessment, field)
+        for field in ("duration_minutes", "starts_at", "ends_at")
+    )
+    if window_changed:
+        _ensure_window_editable(db, assessment)
+
     # Enforce the minimum content only when the update actually publishes the
     # assessment; editing an already-published or still-draft one is untouched.
     new_status = data.get("status", assessment.status)
@@ -305,6 +378,7 @@ def add_section(
 ):
     """Add a section to an assessment, preventing duplicate section ordering."""
     assessment = _owned_assessment(db, current_user, assessment_id)
+    _ensure_paper_editable(db, assessment)
     orders = _section_orders(db, assessment.id)
     section_order = payload.section_order if payload.section_order is not None else (
         (max(orders) + 1) if orders else 1
@@ -349,6 +423,7 @@ def reorder_sections(
 ):
     """Reorder an assessment's sections (each section exactly once)."""
     assessment = _owned_assessment(db, current_user, assessment_id)
+    _ensure_paper_editable(db, assessment)
     sections = (
         db.query(models.AssessmentSection)
         .filter(models.AssessmentSection.assessment_id == assessment.id)
@@ -388,6 +463,7 @@ def update_section(
 ):
     """Update a section, preventing collisions on section_order."""
     assessment = _owned_assessment(db, current_user, assessment_id)
+    _ensure_paper_editable(db, assessment)
     section = _owned_section(db, assessment, section_id)
     data = payload.model_dump(exclude_unset=True)
     new_order = data.get("section_order")
@@ -423,6 +499,7 @@ def remove_section(
 ):
     """Remove a section from an assessment."""
     assessment = _owned_assessment(db, current_user, assessment_id)
+    _ensure_paper_editable(db, assessment)
     section = _owned_section(db, assessment, section_id)
     db.delete(section)
     db.commit()

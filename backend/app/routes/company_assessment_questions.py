@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.deps import get_db
 from app import models, schemas
 from app.routes.company_assessments import (
+    _ensure_paper_editable,
     _owned_assessment,
     _owned_section,
     company_scoped,
@@ -105,6 +106,7 @@ def add_question(
     """Add a question to one of the company's assessment sections, preventing
     duplicate question ordering."""
     assessment = _owned_assessment(db, current_user, assessment_id)
+    _ensure_paper_editable(db, assessment)
     section = _owned_section(db, assessment, section_id)
     allowed = _allowed_question_type(section)
     if allowed is None:
@@ -211,6 +213,7 @@ def reorder_questions(
 ):
     """Reorder a section's questions (each question exactly once)."""
     assessment = _owned_assessment(db, current_user, assessment_id)
+    _ensure_paper_editable(db, assessment)
     section = _owned_section(db, assessment, section_id)
     questions = (
         db.query(models.AssessmentQuestion)
@@ -271,6 +274,7 @@ def update_question(
     """Update a question, preventing collisions on question_order and keeping
     the row valid for its question type."""
     assessment = _owned_assessment(db, current_user, assessment_id)
+    _ensure_paper_editable(db, assessment)
     section = _owned_section(db, assessment, section_id)
     question = _owned_question(db, section, question_id)
 
@@ -324,6 +328,7 @@ def delete_question(
 ):
     """Remove a question from a section."""
     assessment = _owned_assessment(db, current_user, assessment_id)
+    _ensure_paper_editable(db, assessment)
     section = _owned_section(db, assessment, section_id)
     question = _owned_question(db, section, question_id)
     db.delete(question)
