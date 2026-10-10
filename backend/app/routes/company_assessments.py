@@ -48,6 +48,32 @@ def _owned_assessment(
     return assessment
 
 
+def _lock_assessment(
+    db: Session, assessment: models.Assessment
+) -> models.Assessment:
+    """Re-read the assessment row ``FOR UPDATE`` and return the committed state.
+
+    Deletion and candidate assignment both take this lock first, so the two are
+    serialized on the same row and cannot interleave; the lock order is kept
+    consistent (assessment row before assignment rows) to avoid deadlocks. If a
+    transaction that was deleting the assessment committed while this waited,
+    the row is gone here, so callers get a clean 404 instead of acting on stale
+    state. Ownership was already established on the same (immutable-id) row by
+    ``_owned_assessment``. On SQLite the clause is a no-op, but writes there are
+    serialized at the database level anyway.
+    """
+    locked = (
+        db.query(models.Assessment)
+        .filter(models.Assessment.id == assessment.id)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if locked is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    return locked
+
+
 def _owned_section(
     db: Session, assessment: models.Assessment, section_id: int
 ) -> models.AssessmentSection:
@@ -174,6 +200,46 @@ def _ensure_window_editable(db: Session, assessment: models.Assessment) -> None:
             detail=(
                 "Cannot change the assessment duration or window while an "
                 "attempt is in progress"
+            ),
+        )
+
+
+def _ensure_deletable(db: Session, assessment: models.Assessment) -> None:
+    """Reject deletion while any candidate attempt is in progress or submitted.
+
+    Deleting the assessment cascades (ORM ``delete-orphan``) to its sections,
+    questions, assignments and answers, so it would destroy an in-flight exam
+    or already-recorded answers/results. Only assignments that are still merely
+    ``assigned`` may be swept away — nobody has started, so no answer or result
+    exists to lose (this mirrors ``remove_assignment``, which already permits
+    removing a not-started assignment).
+
+    The assignment rows are selected ``FOR UPDATE`` (a no-op on SQLite, whose
+    writes are serialized) in the same transaction as the delete, so a
+    concurrent start/submit cannot slip between this check and the cascade:
+    that transition waits for this lock and then finds the rows gone. Whichever
+    transaction commits first wins — submit-then-delete is rejected here,
+    delete-then-submit finds no assignment (404) rather than silently losing a
+    result.
+    """
+    statuses = {
+        row[0]
+        for row in (
+            db.query(models.AssessmentAssignment.status)
+            .filter(models.AssessmentAssignment.assessment_id == assessment.id)
+            .with_for_update()
+            .all()
+        )
+    }
+    if (
+        models.AssessmentAssignmentStatusEnum.in_progress in statuses
+        or models.AssessmentAssignmentStatusEnum.submitted in statuses
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Cannot delete an assessment once a candidate has started or "
+                "submitted it"
             ),
         )
 
@@ -354,8 +420,17 @@ def delete_assessment(
     current_user: models.User = Depends(company_scoped),
     db: Session = Depends(get_db),
 ):
-    """Delete an assessment the company owns (sections/assignments cascade)."""
+    """Delete an assessment the company owns (sections/assignments cascade).
+
+    Rejected with 409 once any candidate has started or submitted an attempt,
+    so an active exam or recorded result can never be destroyed.
+    """
     assessment = _owned_assessment(db, current_user, assessment_id)
+    # Take the assessment row lock first (same order as assign_candidates) so a
+    # concurrent assignment cannot slip an INSERT in between the check and the
+    # cascade delete; a row deleted while we waited is gone -> 404.
+    assessment = _lock_assessment(db, assessment)
+    _ensure_deletable(db, assessment)
     db.delete(assessment)
     db.commit()
     return None
@@ -619,6 +694,10 @@ def assign_candidates(
     partially applied set.
     """
     assessment = _owned_assessment(db, current_user, assessment_id)
+    # Serialize against a concurrent deletion of the same assessment: take the
+    # assessment row lock, then re-check the live state below. If the delete
+    # committed first, the lock finds no row and this returns a clean 404.
+    assessment = _lock_assessment(db, assessment)
 
     # Candidates may only be assigned to a live assessment: a draft/closed
     # assessment is not available to candidates, and one whose window has
