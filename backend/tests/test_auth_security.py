@@ -74,9 +74,78 @@ def test_access_token_expiry_is_timezone_aware_utc_future():
 # CORS origins configuration
 # ---------------------------------------------------------------------------
 
-def test_cors_origins_default_to_localhost(monkeypatch):
+def test_cors_origins_default_to_loopback_dev_server(monkeypatch):
     monkeypatch.delenv("CORS_ORIGINS", raising=False)
-    assert cors_origins() == ["http://localhost:5173"]
+    assert cors_origins() == [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
+
+def _cors_app():
+    """A minimal app with the exact CORS setup used by app.main."""
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app = FastAPI()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins(),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.get("/aptitude-tests/config")
+    def _config():
+        return {"ok": True}
+
+    return app
+
+
+def test_cors_preflight_allows_both_loopback_spellings(monkeypatch):
+    """Regression: the Aptitude Test page opened at 127.0.0.1:5173 failed every
+    API call with 'Failed to fetch' because the backend only allowed
+    localhost:5173. Both loopback spellings must pass preflight."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.delenv("CORS_ORIGINS", raising=False)
+    client = TestClient(_cors_app())
+
+    for origin in ("http://localhost:5173", "http://127.0.0.1:5173"):
+        pre = client.options(
+            "/aptitude-tests/config",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            },
+        )
+        assert pre.status_code == 200, (origin, pre.status_code)
+        assert pre.headers["access-control-allow-origin"] == origin
+
+        res = client.get(
+            "/aptitude-tests/config", headers={"Origin": origin}
+        )
+        assert res.status_code == 200
+        assert res.headers["access-control-allow-origin"] == origin
+
+
+def test_cors_preflight_rejects_unlisted_origin(monkeypatch):
+    """The allow-list stays closed: an arbitrary origin must not be echoed."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.delenv("CORS_ORIGINS", raising=False)
+    client = TestClient(_cors_app())
+
+    pre = client.options(
+        "/aptitude-tests/config",
+        headers={
+            "Origin": "http://evil.example.com",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert "access-control-allow-origin" not in pre.headers
 
 
 def test_cors_origins_parse_comma_separated(monkeypatch):

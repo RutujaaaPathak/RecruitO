@@ -10,7 +10,16 @@ ENV_FILE = BACKEND_DIR / ".env"
 # Frontend origins allowed to call the API. Defaults to the Vite dev server;
 # override with a comma-separated CORS_ORIGINS value in .env for other
 # environments.
-DEFAULT_CORS_ORIGINS = ["http://localhost:5173"]
+#
+# Both loopback spellings are listed because "localhost" and "127.0.0.1" are
+# distinct CORS origins. A browser opened at http://127.0.0.1:5173 sends that
+# Origin and every API preflight is rejected unless it is explicitly allowed;
+# the frontend then reports "Failed to fetch". The API base URL in the frontend
+# already uses 127.0.0.1, so both must be accepted for local development.
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
 
 
 def load_env():
