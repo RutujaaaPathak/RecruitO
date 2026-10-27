@@ -370,13 +370,20 @@ export default function AssessmentDetail() {
             <h2 className="text-3xl font-bold text-gray-900 dark:text-white">
               {assessment.title}
             </h2>
-            <span
-              className={`mt-3 inline-block px-4 py-2 rounded-full text-sm font-medium ${assessmentStatusBadgeClass(
-                assessment.status
-              )}`}
-            >
-              {ASSESSMENT_STATUS_LABELS[assessment.status]}
-            </span>
+            <div className="mt-3 flex items-center gap-2">
+              <span
+                className={`inline-block px-4 py-2 rounded-full text-sm font-medium ${assessmentStatusBadgeClass(
+                  assessment.status
+                )}`}
+              >
+                {ASSESSMENT_STATUS_LABELS[assessment.status]}
+              </span>
+              {assessment.assessment_type && (
+                <span className="inline-block px-4 py-2 rounded-full text-sm font-medium bg-indigo-100 text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-400 capitalize">
+                  {assessment.assessment_type === "technical_mcq" ? "Technical MCQ" : assessment.assessment_type}
+                </span>
+              )}
+            </div>
           </div>
 
           {!isEditing && (

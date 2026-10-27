@@ -149,12 +149,21 @@ def _assignment_statuses(
 
     An empty set means nobody has been assigned yet, so nothing depends on the
     current content or window.
+
+    The rows are read ``FOR UPDATE`` (a no-op on SQLite, whose writes are
+    serialized): a candidate start is an atomic update on the assignment row,
+    so locking the rows makes a start wait for the caller's transaction. A
+    start that committed first is then observed as ``in_progress`` and the edit
+    is rejected, instead of the start and the edit interleaving and freezing
+    nothing.
     """
     return {
         row[0]
         for row in (
             db.query(models.AssessmentAssignment.status)
             .filter(models.AssessmentAssignment.assessment_id == assessment_id)
+            .order_by(models.AssessmentAssignment.id)
+            .with_for_update()
             .all()
         )
     }
@@ -255,6 +264,7 @@ def _out(assessment: models.Assessment) -> schemas.AssessmentOut:
         title=assessment.title,
         description=assessment.description,
         instructions=assessment.instructions,
+        assessment_type=getattr(assessment, "assessment_type", None),
         status=assessment.status,
         duration_minutes=assessment.duration_minutes,
         starts_at=assessment.starts_at,
@@ -319,6 +329,7 @@ def create_assessment(
         title=payload.title,
         description=payload.description,
         instructions=payload.instructions,
+        assessment_type=payload.assessment_type,
         status=assessment_status,
         duration_minutes=payload.duration_minutes,
         starts_at=payload.starts_at,
@@ -396,6 +407,10 @@ def update_assessment(
         for field in ("duration_minutes", "starts_at", "ends_at")
     )
     if window_changed:
+        # Lock the assessment row first (same order as delete/assign) before the
+        # window guard locks the assignment rows, so the two lock paths can never
+        # cross and deadlock.
+        assessment = _lock_assessment(db, assessment)
         _ensure_window_editable(db, assessment)
 
     # Enforce the minimum content only when the update actually publishes the
@@ -816,14 +831,32 @@ def remove_assignment(
     current_user: models.User = Depends(company_scoped),
     db: Session = Depends(get_db),
 ):
-    """Remove an assignment only before the candidate has started it."""
+    """Remove an assignment only before the candidate has started it.
+
+    The status is re-read under a ``FOR UPDATE`` row lock before the delete,
+    because a candidate start is an atomic ``assigned -> in_progress`` update on
+    this same row. Checking the status without the lock left a race: a start
+    committing between the check and the delete let the DELETE cascade away an
+    already-active attempt. Holding the lock makes a concurrent start wait;
+    whichever commits first wins (start first -> 409 here, remove first -> the
+    start's conditional update matches no row and returns 404).
+    """
     assessment = _owned_assessment(db, current_user, assessment_id)
     assignment = _owned_assignment(db, assessment, assignment_id)
-    if assignment.status != models.AssessmentAssignmentStatusEnum.assigned:
+    locked = (
+        db.query(models.AssessmentAssignment)
+        .filter(models.AssessmentAssignment.id == assignment.id)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if locked is None:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    if locked.status != models.AssessmentAssignmentStatusEnum.assigned:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot remove an assignment once the candidate has started it",
         )
-    db.delete(assignment)
+    db.delete(locked)
     db.commit()
     return None

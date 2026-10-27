@@ -3,6 +3,7 @@ import type { AssessmentAssignmentStatus } from "./assignments";
 import { parseApiDate, toDateTimeLocalInput } from "./datetime";
 
 export type AssessmentStatus = "draft" | "published" | "closed";
+export type AssessmentType = "aptitude" | "technical_mcq" | "coding";
 
 export type AssessmentSectionType =
   | "aptitude"
@@ -17,6 +18,7 @@ export interface Assessment {
   title: string;
   description: string | null;
   instructions: string | null;
+  assessment_type?: AssessmentType | null;
   status: AssessmentStatus;
   duration_minutes: number | null;
   starts_at: string | null;
@@ -57,6 +59,7 @@ export interface AssessmentPayload {
   title: string;
   description: string | null;
   instructions: string | null;
+  assessment_type?: AssessmentType | null;
   status: AssessmentStatus;
   duration_minutes: number | null;
   starts_at: string | null;
@@ -79,6 +82,7 @@ export interface AssessmentFormState {
   title: string;
   description: string;
   instructions: string;
+  assessment_type?: AssessmentType | null;
   status: AssessmentStatus;
   duration: string;
   startsAt: string;
@@ -139,11 +143,12 @@ export function formatDateTime(iso: string | null | undefined): string {
   })}`;
 }
 
-export function emptyAssessmentForm(): AssessmentFormState {
+export function emptyAssessmentForm(type?: AssessmentType | null): AssessmentFormState {
   return {
     title: "",
     description: "",
     instructions: "",
+    assessment_type: type ?? null,
     status: "draft",
     duration: "",
     startsAt: "",
@@ -158,6 +163,7 @@ export function assessmentToFormState(
     title: assessment.title,
     description: assessment.description ?? "",
     instructions: assessment.instructions ?? "",
+    assessment_type: assessment.assessment_type ?? null,
     status: assessment.status,
     duration:
       assessment.duration_minutes != null
@@ -216,13 +222,12 @@ export function assessmentFormToPayload(
     title: form.title.trim(),
     description: trimmedDescription || null,
     instructions: trimmedInstructions || null,
+    assessment_type: form.assessment_type ?? null,
     status: form.status,
     duration_minutes: form.duration.trim()
       ? Number(form.duration.trim())
       : null,
-    starts_at: form.startsAt
-      ? new Date(form.startsAt).toISOString()
-      : null,
+    starts_at: form.startsAt ? new Date(form.startsAt).toISOString() : null,
     ends_at: form.endsAt ? new Date(form.endsAt).toISOString() : null,
   };
 }

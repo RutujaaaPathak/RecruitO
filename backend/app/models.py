@@ -1113,23 +1113,14 @@ class Notification(Base):
 # -----------------------------
 # Company Assessments (recruitment pipeline)
 # -----------------------------
+class AssessmentTypeEnum(str, enum.Enum):
+    aptitude = "aptitude"
+    technical_mcq = "technical_mcq"
+    coding = "coding"
+
+
 class Assessment(Base):
-    """A company-authored assessment for screening candidates.
-
-    This is the *catalog* / assignment layer of the recruitment pipeline. A
-    company publishes an assessment (title, instructions, validity window,
-    total duration) made of ordered sections (aptitude / technical / coding /
-    HR / technical interview) and then assigns it to candidate users. It is
-    deliberately kept separate from the Mock Practice subsystem (aptitude /
-    coding / video interview): there is no question bank, attempt, answer,
-    scoring or report here — sections simply *reference* a section type that a
-    future engine can fulfil.
-
-    Lifecycle/status is company-facing (draft → published → closed) and lives
-    in its own enum intentionally: it is not the candidate-facing
-    ``AssessmentStatusEnum`` (in_progress/completed) reused by video
-    interviews and mcq/video mock practice.
-    """
+    """A company-authored assessment for screening candidates."""
 
     __tablename__ = "assessments"
     __table_args__ = (
@@ -1147,6 +1138,10 @@ class Assessment(Base):
     title = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     instructions = Column(Text, nullable=True)
+    assessment_type = Column(
+        Enum(AssessmentTypeEnum, name="assessmenttypeenum"),
+        nullable=True,
+    )
     status = Column(
         Enum(CompanyAssessmentStatusEnum, name="companyassessmentstatusenum"),
         default=CompanyAssessmentStatusEnum.draft,

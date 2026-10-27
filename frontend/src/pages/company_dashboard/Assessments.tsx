@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ClipboardList, Plus, X } from "lucide-react";
+import { BrainCircuit, ClipboardList, Code, FileText, Plus, X } from "lucide-react";
 import CompanyLayout from "./CompanyLayout";
 import AssessmentFormFields from "./AssessmentFormFields";
 import {
   Assessment,
   AssessmentFormState,
+  AssessmentType,
   assessmentFormToPayload,
   assessmentStatusBadgeClass,
   createAssessment,
@@ -23,6 +24,8 @@ export default function Assessments() {
   const [error, setError] = useState<string | null>(null);
 
   const [showCreate, setShowCreate] = useState<boolean>(false);
+  const [showTypeSelect, setShowTypeSelect] = useState<boolean>(false);
+  const [selectedType, setSelectedType] = useState<AssessmentType | null>(null);
   const [form, setForm] = useState<AssessmentFormState>(
     emptyAssessmentForm()
   );
@@ -49,8 +52,16 @@ export default function Assessments() {
   }, [loadAssessments]);
 
   const openCreate = (): void => {
-    setForm(emptyAssessmentForm());
+    setSelectedType(null);
+    setShowTypeSelect(true);
     setFormError(null);
+  };
+
+  const chooseType = (type: AssessmentType): void => {
+    setSelectedType(type);
+    setForm(emptyAssessmentForm(type));
+    setFormError(null);
+    setShowTypeSelect(false);
     setShowCreate(true);
   };
 
@@ -93,7 +104,7 @@ export default function Assessments() {
             className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-3 rounded-xl font-medium transition shadow-md hover:shadow-lg"
           >
             <Plus size={18} />
-            Create Assessment
+            Create Test
           </button>
         </div>
 
@@ -188,6 +199,60 @@ export default function Assessments() {
           </div>
         )}
 
+        {/* Test Type Selection */}
+        {showTypeSelect && (
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
+            <div className="
+              bg-white dark:bg-gray-900
+              w-full max-w-2xl
+              rounded-2xl p-6
+              border border-gray-200 dark:border-gray-800
+              shadow-xl space-y-4
+            ">
+              <div className="flex justify-between items-center">
+                <h3 className="text-gray-900 dark:text-white text-lg font-semibold">
+                  Create Test
+                </h3>
+                <button
+                  onClick={() => setShowTypeSelect(false)}
+                  aria-label="Close dialog"
+                >
+                  <X className="text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white" />
+                </button>
+              </div>
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                Choose the type of test you want to create.
+              </p>
+              <div className="grid md:grid-cols-3 gap-4">
+                <button
+                  onClick={() => chooseType("aptitude")}
+                  className="p-6 rounded-xl border border-gray-200 dark:border-gray-800 hover:border-indigo-500 hover:shadow-lg transition text-left"
+                >
+                  <BrainCircuit className="text-indigo-500 mb-3" />
+                  <h4 className="font-semibold text-gray-900 dark:text-white">Aptitude Test</h4>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Quantitative, Logical Reasoning, Verbal Ability, Mixed</p>
+                </button>
+                <button
+                  onClick={() => chooseType("technical_mcq")}
+                  className="p-6 rounded-xl border border-gray-200 dark:border-gray-800 hover:border-indigo-500 hover:shadow-lg transition text-left"
+                >
+                  <FileText className="text-indigo-500 mb-3" />
+                  <h4 className="font-semibold text-gray-900 dark:text-white">Technical MCQ Test</h4>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Multiple-choice technical questions with options & correct answers</p>
+                </button>
+                <button
+                  onClick={() => chooseType("coding")}
+                  className="p-6 rounded-xl border border-gray-200 dark:border-gray-800 hover:border-indigo-500 hover:shadow-lg transition text-left"
+                >
+                  <Code className="text-indigo-500 mb-3" />
+                  <h4 className="font-semibold text-gray-900 dark:text-white">Coding Test</h4>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Programming questions with sample and hidden test cases</p>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Create Modal */}
         {showCreate && (
           <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
@@ -200,7 +265,7 @@ export default function Assessments() {
             ">
               <div className="flex justify-between items-center">
                 <h3 className="text-gray-900 dark:text-white text-lg font-semibold">
-                  Create New Assessment
+                  {selectedType === "aptitude" ? "Create Aptitude Test" : selectedType === "technical_mcq" ? "Create Technical MCQ Test" : selectedType === "coding" ? "Create Coding Test" : "Create New Assessment"}
                 </h3>
                 <button
                   onClick={() => setShowCreate(false)}

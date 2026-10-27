@@ -13,6 +13,7 @@ from app.models import (
     CodingTestStatusEnum,
     NotificationType,
     CompanyAssessmentStatusEnum,
+    AssessmentTypeEnum,
     AssessmentSectionTypeEnum,
     AssessmentAssignmentStatusEnum,
     AssessmentQuestionTypeEnum,
@@ -945,6 +946,7 @@ class AssessmentOut(BaseModel):
     title: str
     description: Optional[str] = None
     instructions: Optional[str] = None
+    assessment_type: Optional[AssessmentTypeEnum] = None
     status: CompanyAssessmentStatusEnum
     duration_minutes: Optional[int] = None
     starts_at: Optional[datetime] = None
@@ -964,16 +966,12 @@ class AssessmentDetailOut(AssessmentOut):
 
 
 class AssessmentCreate(BaseModel):
-    """Create a company assessment (catalog entry — no sections/assignments yet).
-
-    ``status`` defaults to draft. ``duration_minutes`` must be positive and,
-    when both ``starts_at`` and ``ends_at`` are supplied, the validity window
-    must be ordered (ends_at on or after starts_at).
-    """
+    """Create a company assessment (catalog entry �?" no sections/assignments yet)."""
 
     title: str
     description: Optional[str] = None
     instructions: Optional[str] = None
+    assessment_type: Optional[AssessmentTypeEnum] = None
     status: Optional[CompanyAssessmentStatusEnum] = CompanyAssessmentStatusEnum.draft
     duration_minutes: Optional[int] = Field(default=None, ge=1)
     starts_at: Optional[datetime] = None
@@ -996,6 +994,7 @@ class AssessmentUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     instructions: Optional[str] = None
+    assessment_type: Optional[AssessmentTypeEnum] = None
     status: Optional[CompanyAssessmentStatusEnum] = None
     duration_minutes: Optional[int] = Field(default=None, ge=1)
     starts_at: Optional[datetime] = None
